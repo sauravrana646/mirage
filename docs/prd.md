@@ -7,7 +7,7 @@
 
 ## 1. Summary
 
-Mirage is a Kubernetes operator that creates **ephemeral preview environments** for pull requests and deletes them when the PR is closed or a TTL expires. Users declare desire via a CRD (`PreviewEnvironment`); the controller reconciles cluster state to match.
+Mirage is a Kubernetes operator that creates **ephemeral preview environments** for pull requests and deletes them when the PR is closed or a TTL expires. Users declare desire via a namespaced CRD (`PreviewEnvironment`); the controller reconciles cluster state to match.
 
 ## 2. Problem
 
@@ -31,6 +31,7 @@ Mirage is a Kubernetes operator that creates **ephemeral preview environments** 
 - Full multi-tenant SaaS control plane
 - Replacing Argo CD / Flux as general GitOps
 - Running LLMs inside the reconcile loop
+- In-cluster image builds (CI pushes digests into the CR)
 
 ## 5. Users & jobs
 
@@ -51,15 +52,15 @@ Mirage is a Kubernetes operator that creates **ephemeral preview environments** 
 
 | ID | Requirement | Priority |
 |----|-------------|----------|
-| F1 | CRD `PreviewEnvironment` with source, image/ref, TTL, optional overrides | P0 |
-| F2 | Create Namespace (or use specified ns) owned by the CR | P0 |
+| F1 | CRD `PreviewEnvironment` with source, image/ref, TTL (`ttlSeconds`), optional overrides | P0 |
+| F2 | Create `targetNamespace` (or use specified ns) managed by CR finalizer | P0 |
 | F3 | Deploy a minimal app (Deployment + Service; Ingress later) | P0 |
-| F4 | Status: phase/conditions, message, optional URL | P0 |
-| F5 | Finalizer deletes owned resources on CR delete | P0 |
-| F6 | TTL expiry triggers cleanup | P1 |
-| F7 | GitHub webhook / Action creates/updates/deletes CRs | P1 |
+| F4 | Status: phase/conditions, message, optional URL, computed `expiresAt` | P0 |
+| F5 | Finalizer deletes owned resources + target namespace on CR delete | P0 |
+| F6 | TTL expiry triggers full cleanup (children, namespace, CR) | P1 |
+| F7 | GitHub Action: build image digest + create/update/delete CRs | P1 |
 | F8 | Optional: create Argo CD `Application` instead of direct apply | P2 |
-| F9 | ResourceQuota / LimitRange defaults per preview | P2 |
+| F9 | ResourceQuota / LimitRange defaults per preview | P1 (once shared); P2 packaging polish |
 | F10 | AI failure summary posted to PR (side service) | P3 |
 
 ## 8. Non-functional requirements
@@ -70,12 +71,13 @@ Mirage is a Kubernetes operator that creates **ephemeral preview environments** 
 | N2 | Works on kind for local demos |
 | N3 | Structured logs + Kubernetes events |
 | N4 | Unit tests via `envtest`; smoke e2e on kind |
-| N5 | Least-privilege RBAC for the manager |
+| N5 | Least-privilege RBAC for the manager and for CI (Phase 4) |
 
 ## 9. Success metrics
 
 - Create → Ready path works with only `kubectl apply -f sample.yaml`
 - Delete CR → namespace gone within reconcile SLA (e.g. &lt; 2 minutes on kind)
+- TTL expiry removes preview without manual delete
 - At least one end-to-end GitHub PR demo recorded in docs
 - Decision log stays current (no silent architecture drift)
 
@@ -84,15 +86,22 @@ Mirage is a Kubernetes operator that creates **ephemeral preview environments** 
 See [plan.md](./plan.md) for detailed phases. High level:
 
 1. Manual CR → namespace + deploy + status + finalizer  
-2. TTL + Ingress URL  
-3. GitHub integration  
-4. Argo CD path  
-5. AI advisory path  
+2. TTL + Ingress URL (nginx + nip.io on kind)  
+3. GitHub integration (build image + Action applies CR)  
+4. Hardening defaults (quota/limits; NetworkPolicy optional)  
+5. Argo CD path  
+6. AI advisory path  
 
 ## 11. Open questions
 
 Record answers in [decisions.md](./decisions.md) when resolved.
 
-- Namespace-per-PR vs shared namespace with name prefix?
-- Image build in-cluster vs external CI pushes image digest into CR?
-- Default ingress controller assumption (nginx, Traefik, none)?
+~~Namespace-per-PR vs shared namespace with name prefix?~~ → **one namespace per preview** (accepted).  
+~~Image build in-cluster vs external CI?~~ → **external CI pushes digest** (accepted for early phases).  
+~~Default ingress controller?~~ → **nginx + nip.io on kind** (accepted for Phase 3).  
+~~CR Namespaced vs Cluster?~~ → **Namespaced** (accepted).
+
+Remaining:
+
+- Exact label/annotation scheme for namespace ownership (`mirage.dev/owner-uid`, …)?
+- OIDC to cluster for CI vs long-lived kubeconfig secret (prefer OIDC when practical)?

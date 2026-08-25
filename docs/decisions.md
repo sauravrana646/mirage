@@ -19,6 +19,58 @@ Template:
 
 ---
 
+## 2026-08-25 — Default ingress: nginx + nip.io on kind
+
+**Status:** Accepted (Phase 3)
+
+**Context:** Need one reachable URL recipe for demos without operating real DNS.
+
+**Decision:** Phase 3 supports **nginx ingress controller** on kind and **nip.io-style** hosts (e.g. `pr-42.<node-ip>.nip.io`). Other controllers (Traefik, Gateway API) are out of scope until after the first demo works.
+
+**Consequences:** Docs and samples assume nginx; Gateway API remains a later option noted in the plan.
+
+---
+
+## 2026-08-25 — TTL: ttlSeconds only; expiry deletes the CR
+
+**Status:** Accepted (v1alpha1)
+
+**Context:** CRD sketch had both `ttlSeconds` and `expiresAt`; cleanup semantics were ambiguous (delete workload vs mark expired vs delete CR).
+
+**Decision:** v1alpha1 exposes **`spec.ttlSeconds` only**. On create (or first observe), controller sets `status.expiresAt = now + ttl`. When past expiry: set `phase=Expiring`, delete children / target namespace, then **delete the PreviewEnvironment CR** (or remove finalizer so the CR goes away). No long-lived `Expired` tombstone in v1.
+
+**Consequences:** Simpler API; audit of past previews is via Events/logs, not retained CRs. Absolute `expiresAt` in spec can be added later if needed.
+
+---
+
+## 2026-08-25 — Ownership: Namespaced CR + finalizer-managed targetNamespace
+
+**Status:** Accepted
+
+**Context:** A Namespaced CR cannot owner-reference a cluster-scoped Namespace. Need isolation without forcing Cluster scope.
+
+**Decision:**
+- `PreviewEnvironment` is **Namespaced** (default install ns: `mirage-system`).
+- Each preview gets its own **`spec.targetNamespace`**.
+- Controller uses a **finalizer** on the CR to create/delete that namespace; **ownerReferences** apply only to namespaced children *inside* `targetNamespace` (Deployment, Service, Ingress, Quota, …).
+- Do **not** set ownerRef from the CR onto the Namespace object.
+
+**Consequences:** Clear blast radius; CI can be RBAC’d to Mirage CRs in `mirage-system` without cluster-admin. Cluster-scoped CR remains possible later if we want Namespace ownerRefs.
+
+---
+
+## 2026-08-25 — CR scope: Namespaced
+
+**Status:** Accepted (supersedes OPEN — CR scope)
+
+**Context:** Namespaced CRs are easier to RBAC; Cluster scope can watch all previews centrally.
+
+**Decision:** **Namespaced** API for `PreviewEnvironment`.
+
+**Consequences:** Kubebuilder scaffold uses namespaced markers; samples live under a management namespace; see ownership decision above.
+
+---
+
 ## 2026-08-25 — Project name: Mirage
 
 **Status:** Accepted
@@ -105,22 +157,10 @@ Template:
 
 ## 2026-08-25 — One namespace per preview (lean default)
 
-**Status:** Proposed
+**Status:** Accepted (was Proposed)
 
 **Context:** Isolation vs density.
 
-**Decision (lean):** Default to one namespace per preview env.
+**Decision:** Default to one namespace per preview env (`spec.targetNamespace`).
 
 **Consequences:** Easier quotas/NetworkPolicies; more namespaces. Revisit if control-plane load becomes an issue.
-
----
-
-## OPEN — CR scope: Namespaced vs Cluster
-
-**Status:** Proposed
-
-**Context:** Namespaced CRs are easier to RBAC; Cluster scope can watch all previews centrally.
-
-**Decision:** TBD in Phase 1 scaffold — document choice here when set.
-
-**Consequences:** Affects Kubebuilder API markers and sample paths.
