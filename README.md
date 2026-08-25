@@ -26,9 +26,14 @@ Teams want per-PR previews without hand-maintained ApplicationSets, leftover nam
 
 - **Go** + **Kubebuilder** / `controller-runtime`
 - **kind** for local clusters
-- **GitHub** for PR events (phase 2+)
-- **Argo CD** optional (phase 3)
-- **AI** as a side path (phase 4+) — never in the hot reconcile loop
+- **GitHub** Actions for image build + CR apply (phase 4)
+- **nginx ingress** + nip.io for preview URLs on kind (phase 3)
+- **Argo CD** optional backend (phase 6)
+- **AI** as a side path (phase 7+) — never in the hot reconcile loop
+
+## Locked design defaults
+
+See [`docs/decisions.md`](./docs/decisions.md). Short version: namespaced `PreviewEnvironment`, finalizer-managed `targetNamespace`, `ttlSeconds` only (expiry deletes the CR).
 
 ## Quick links
 
