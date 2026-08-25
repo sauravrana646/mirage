@@ -1,0 +1,26 @@
+# Binaries
+bin/
+dist/
+*.exe
+*.test
+*.out
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Kubebuilder / codegen
+cover.out
+coverage.txt
+*.coverprofile
+
+# Local cluster / secrets
+*.kubeconfig
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+vendor/
