@@ -1,4 +1,5 @@
-# Example GitHub Actions workflow: build image on PR and upsert PreviewEnvironment.
+# Example / reference workflow snippet.
+# Production copy: .github/workflows/preview.yml (digest push, Ready wait, PR comment).
 # Requires secrets: KUBE_CONFIG (base64 kubeconfig limited to mirage-ci SA) and
 # GHCR permissions for packages:write. Adjust image registry as needed.
 name: preview
