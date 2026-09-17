@@ -1,0 +1,219 @@
+/*
+Copyright 2026 Saurav Rana.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	miragev1alpha1 "github.com/sauravrana646/mirage/api/v1alpha1"
+)
+
+var _ = Describe("PreviewEnvironment Controller", func() {
+	const (
+		resourceName = "test-preview"
+		timeout      = time.Second * 10
+		interval     = time.Millisecond * 250
+	)
+
+	ctx := context.Background()
+
+	Context("when creating a PreviewEnvironment", func() {
+		var (
+			targetNS           string
+			typeNamespacedName types.NamespacedName
+			reconciler         *PreviewEnvironmentReconciler
+		)
+
+		BeforeEach(func() {
+			targetNS = "preview-test-" + randomSuffix()
+			typeNamespacedName = types.NamespacedName{Name: resourceName, Namespace: "default"}
+			reconciler = &PreviewEnvironmentReconciler{
+				Client: k8sClient,
+				Scheme: k8sClient.Scheme(),
+			}
+
+			By("creating the PreviewEnvironment")
+			pe := &miragev1alpha1.PreviewEnvironment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName,
+					Namespace: "default",
+				},
+				Spec: miragev1alpha1.PreviewEnvironmentSpec{
+					Image:           "nginx:1.27-alpine",
+					TargetNamespace: targetNS,
+					ContainerPort:   80,
+					Replicas:        int32Ptr(1),
+				},
+			}
+			Expect(k8sClient.Create(ctx, pe)).To(Succeed())
+		})
+
+		AfterEach(func() {
+			pe := &miragev1alpha1.PreviewEnvironment{}
+			err := k8sClient.Get(ctx, typeNamespacedName, pe)
+			if apierrors.IsNotFound(err) {
+				return
+			}
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Delete(ctx, pe)).To(Succeed())
+
+			// Drive finalizer cleanup
+			Eventually(func(g Gomega) {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+				g.Expect(err).NotTo(HaveOccurred())
+				err = k8sClient.Get(ctx, typeNamespacedName, &miragev1alpha1.PreviewEnvironment{})
+				g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+
+			// Namespace may linger in Terminating under envtest; best-effort delete
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: targetNS}})
+		})
+
+		It("creates namespace, deployment, service and reaches Ready after deploy available", func() {
+			By("adding finalizer")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			By("ensuring children")
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			ns := &corev1.Namespace{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: targetNS}, ns)).To(Succeed())
+			Expect(ns.Labels[miragev1alpha1.LabelManagedBy]).To(Equal(miragev1alpha1.ManagedByValue))
+
+			deploy := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: targetNS}, deploy)).To(Succeed())
+			Expect(deploy.Spec.Template.Spec.Containers[0].Image).To(Equal("nginx:1.27-alpine"))
+
+			svc := &corev1.Service{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: targetNS}, svc)).To(Succeed())
+
+			By("simulating Deployment available")
+			deploy.Status.Replicas = 1
+			deploy.Status.ReadyReplicas = 1
+			deploy.Status.UpdatedReplicas = 1
+			deploy.Status.AvailableReplicas = 1
+			deploy.Status.ObservedGeneration = deploy.Generation
+			Expect(k8sClient.Status().Update(ctx, deploy)).To(Succeed())
+
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			pe := &miragev1alpha1.PreviewEnvironment{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, pe)).To(Succeed())
+			Expect(pe.Status.Phase).To(Equal(miragev1alpha1.PhaseReady))
+			Expect(pe.Status.Conditions).NotTo(BeEmpty())
+		})
+
+		It("reports NamespaceConflict when target namespace is foreign", func() {
+			foreign := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: targetNS}}
+			// Namespace may already exist from first reconcile in parallel — create before reconcile path
+			// Recreate scenario: delete PE children first by using a unique NS that we pre-create
+			conflictNS := "preview-conflict-" + randomSuffix()
+			Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: conflictNS}})).To(Succeed())
+
+			pe := &miragev1alpha1.PreviewEnvironment{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, pe)).To(Succeed())
+			pe.Spec.TargetNamespace = conflictNS
+			Expect(k8sClient.Update(ctx, pe)).To(Succeed())
+
+			_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, typeNamespacedName, pe)).To(Succeed())
+			Expect(pe.Status.Phase).To(Equal(miragev1alpha1.PhaseFailed))
+			Expect(pe.Status.Conditions[0].Reason).To(Equal(miragev1alpha1.ReasonNamespaceConflict))
+
+			_ = foreign // silence if unused in some paths
+			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: conflictNS}})
+		})
+	})
+
+	Context("when image is missing", func() {
+		It("is rejected by CRD validation", func() {
+			pe := &miragev1alpha1.PreviewEnvironment{
+				ObjectMeta: metav1.ObjectMeta{Name: "bad-image", Namespace: "default"},
+				Spec: miragev1alpha1.PreviewEnvironmentSpec{
+					TargetNamespace: "preview-bad-" + randomSuffix(),
+				},
+			}
+			err := k8sClient.Create(ctx, pe)
+			Expect(err).To(HaveOccurred())
+		})
+	})
+
+	Context("TTL expiry", func() {
+		It("deletes the CR after expiry", func() {
+			name := types.NamespacedName{Name: "ttl-preview", Namespace: "default"}
+			targetNS := "preview-ttl-" + randomSuffix()
+			ttl := int64(1)
+			pe := &miragev1alpha1.PreviewEnvironment{
+				ObjectMeta: metav1.ObjectMeta{Name: name.Name, Namespace: name.Namespace},
+				Spec: miragev1alpha1.PreviewEnvironmentSpec{
+					Image:           "nginx:1.27-alpine",
+					TargetNamespace: targetNS,
+					TTLSeconds:      &ttl,
+					ContainerPort:   80,
+				},
+			}
+			Expect(k8sClient.Create(ctx, pe)).To(Succeed())
+
+			reconciler := &PreviewEnvironmentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, name, pe)).To(Succeed())
+			Expect(pe.Status.ExpiresAt).NotTo(BeNil())
+
+			// Force expiry in the past
+			past := metav1.NewTime(time.Now().Add(-time.Minute))
+			pe.Status.ExpiresAt = &past
+			Expect(k8sClient.Status().Update(ctx, pe)).To(Succeed())
+
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Finalizer cleanup
+			Eventually(func(g Gomega) {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				g.Expect(err).NotTo(HaveOccurred())
+				err = k8sClient.Get(ctx, name, &miragev1alpha1.PreviewEnvironment{})
+				g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+})
+
+func int32Ptr(v int32) *int32 { return &v }
+
+func randomSuffix() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
+}

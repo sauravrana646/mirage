@@ -6,6 +6,30 @@ Format inspired by ADRs — keep each entry short.
 Template:
 
 ```markdown
+## 2026-09-17 — API group served as mirage.dev
+
+**Status:** Accepted
+
+**Context:** Kubebuilder defaulted to `mirage.mirage.dev` (group + domain). Docs and PRD use `mirage.dev/v1alpha1`.
+
+**Decision:** Override `+groupName` / GroupVersion to **`mirage.dev`**.
+
+**Consequences:** CRD file is `mirage.dev_previewenvironments.yaml`; samples use `apiVersion: mirage.dev/v1alpha1`.
+
+---
+
+## 2026-09-17 — No cross-namespace ownerReferences
+
+**Status:** Accepted
+
+**Context:** Namespaced CRs cannot owner-reference objects in another namespace (or Namespaces).
+
+**Decision:** Label workloads/namespaces with `mirage.dev/owner-uid`; cleanup deletes the owned `targetNamespace` via finalizer. Do not call `SetControllerReference` across namespaces.
+
+**Consequences:** GC will not cascade from CR deletion alone — finalizer is mandatory. Matches earlier ownership ADR.
+
+---
+
 ## YYYY-MM-DD — Title
 
 **Status:** Accepted | Proposed | Superseded by YYYY-MM-DD

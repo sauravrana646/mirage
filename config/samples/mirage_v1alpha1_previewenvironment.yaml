@@ -1,0 +1,19 @@
+apiVersion: mirage.dev/v1alpha1
+kind: PreviewEnvironment
+metadata:
+  labels:
+    app.kubernetes.io/name: mirage
+    app.kubernetes.io/managed-by: kustomize
+  name: preview-sample
+  namespace: default
+spec:
+  image: nginx:1.27-alpine
+  targetNamespace: preview-sample
+  containerPort: 80
+  replicas: 1
+  ttlSeconds: 3600
+  backend: direct
+  # ingress:
+  #   enabled: true
+  #   host: preview-sample.127.0.0.1.nip.io
+  #   ingressClassName: nginx
