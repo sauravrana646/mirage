@@ -72,8 +72,6 @@ type PreviewEnvironmentReconciler struct {
 
 // Reconcile moves cluster state toward the PreviewEnvironment spec.
 func (r *PreviewEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
 	pe := &miragev1alpha1.PreviewEnvironment{}
 	if err := r.Get(ctx, req.NamespacedName, pe); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -91,57 +89,70 @@ func (r *PreviewEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return r.reconcileDelete(ctx, pe)
 	}
 
-	if pe.Spec.Image == "" {
-		if err := r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse,
-			miragev1alpha1.ReasonImageInvalid, "spec.image is required", "", nil); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-	if pe.Spec.TargetNamespace == "" {
-		if err := r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse,
-			miragev1alpha1.ReasonInvalidSpec, "spec.targetNamespace is required", "", nil); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-	if errs := validation.IsDNS1123Label(pe.Spec.TargetNamespace); len(errs) > 0 {
-		if err := r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse,
-			miragev1alpha1.ReasonInvalidSpec, fmt.Sprintf("invalid targetNamespace: %v", errs), "", nil); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
-	}
-	if pe.Spec.Backend != "" && pe.Spec.Backend != "direct" {
-		if err := r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse,
-			miragev1alpha1.ReasonRolloutFailed, fmt.Sprintf("backend %q is not implemented yet", pe.Spec.Backend), "", nil); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+	if msg, reason := validateSpec(pe); msg != "" {
+		return ctrl.Result{}, r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse, reason, msg, "", nil)
 	}
 
-	now := time.Now()
+	expiresAt := computeExpiresAt(pe, time.Now())
+	if expired, result, err := r.handleExpiry(ctx, pe, expiresAt); expired {
+		return result, err
+	}
+
+	return r.reconcileActive(ctx, pe, expiresAt)
+}
+
+func validateSpec(pe *miragev1alpha1.PreviewEnvironment) (message, reason string) {
+	if pe.Spec.Image == "" {
+		return "spec.image is required", miragev1alpha1.ReasonImageInvalid
+	}
+	if pe.Spec.TargetNamespace == "" {
+		return "spec.targetNamespace is required", miragev1alpha1.ReasonInvalidSpec
+	}
+	if errs := validation.IsDNS1123Label(pe.Spec.TargetNamespace); len(errs) > 0 {
+		return fmt.Sprintf("invalid targetNamespace: %v", errs), miragev1alpha1.ReasonInvalidSpec
+	}
+	if pe.Spec.Backend != "" && pe.Spec.Backend != "direct" {
+		return fmt.Sprintf("backend %q is not implemented yet", pe.Spec.Backend), miragev1alpha1.ReasonRolloutFailed
+	}
+	return "", ""
+}
+
+func computeExpiresAt(pe *miragev1alpha1.PreviewEnvironment, now time.Time) *metav1.Time {
 	expiresAt := pe.Status.ExpiresAt.DeepCopy()
 	if pe.Spec.TTLSeconds != nil && *pe.Spec.TTLSeconds > 0 && expiresAt == nil {
 		t := metav1.NewTime(now.Add(time.Duration(*pe.Spec.TTLSeconds) * time.Second))
 		expiresAt = &t
 	}
+	return expiresAt
+}
 
-	if expiresAt != nil && !expiresAt.After(now) {
-		logger.Info("TTL expired; cleaning up preview", "expiresAt", expiresAt.Time)
-		if err := r.patchStatus(ctx, pe, miragev1alpha1.PhaseExpiring, metav1.ConditionFalse,
-			miragev1alpha1.ReasonExpiring, "TTL elapsed; deleting preview", pe.Status.URL, expiresAt); err != nil {
-			return ctrl.Result{}, err
-		}
-		if err := r.cleanupTarget(ctx, pe); err != nil {
-			return ctrl.Result{}, err
-		}
-		if err := r.Delete(ctx, pe); err != nil && !apierrors.IsNotFound(err) {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
+func (r *PreviewEnvironmentReconciler) handleExpiry(
+	ctx context.Context,
+	pe *miragev1alpha1.PreviewEnvironment,
+	expiresAt *metav1.Time,
+) (handled bool, result ctrl.Result, err error) {
+	if expiresAt == nil || expiresAt.After(time.Now()) {
+		return false, ctrl.Result{}, nil
 	}
+	log.FromContext(ctx).Info("TTL expired; cleaning up preview", "expiresAt", expiresAt.Time)
+	if err := r.patchStatus(ctx, pe, miragev1alpha1.PhaseExpiring, metav1.ConditionFalse,
+		miragev1alpha1.ReasonExpiring, "TTL elapsed; deleting preview", pe.Status.URL, expiresAt); err != nil {
+		return true, ctrl.Result{}, err
+	}
+	if err := r.cleanupTarget(ctx, pe); err != nil {
+		return true, ctrl.Result{}, err
+	}
+	if err := r.Delete(ctx, pe); err != nil && !apierrors.IsNotFound(err) {
+		return true, ctrl.Result{}, err
+	}
+	return true, ctrl.Result{}, nil
+}
 
+func (r *PreviewEnvironmentReconciler) reconcileActive(
+	ctx context.Context,
+	pe *miragev1alpha1.PreviewEnvironment,
+	expiresAt *metav1.Time,
+) (ctrl.Result, error) {
 	if err := r.ensureNamespace(ctx, pe); err != nil {
 		reason := miragev1alpha1.ReasonRolloutFailed
 		if isNamespaceConflict(err) {
@@ -151,50 +162,59 @@ func (r *PreviewEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{RequeueAfter: requeueFast}, nil
 	}
 
-	if err := r.ensureLimitRange(ctx, pe); err != nil {
+	if err := r.ensureChildren(ctx, pe); err != nil {
 		_ = r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse,
 			miragev1alpha1.ReasonRolloutFailed, err.Error(), "", expiresAt)
 		return ctrl.Result{}, err
+	}
+
+	deploy := &appsv1.Deployment{}
+	if err := r.Get(ctx, types.NamespacedName{Name: pe.Name, Namespace: pe.Spec.TargetNamespace}, deploy); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	url := previewURL(pe)
+	phase, cond, reason, msg, requeue := readinessResult(deploy, expiresAt)
+	if err := r.patchStatus(ctx, pe, phase, cond, reason, msg, url, expiresAt); err != nil {
+		return ctrl.Result{}, err
+	}
+	return requeue, nil
+}
+
+func (r *PreviewEnvironmentReconciler) ensureChildren(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
+	if err := r.ensureLimitRange(ctx, pe); err != nil {
+		return err
 	}
 	if err := r.ensureResourceQuota(ctx, pe); err != nil {
-		_ = r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse,
-			miragev1alpha1.ReasonRolloutFailed, err.Error(), "", expiresAt)
-		return ctrl.Result{}, err
+		return err
 	}
-
-	deploy, err := r.ensureDeployment(ctx, pe)
-	if err != nil {
-		_ = r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse,
-			miragev1alpha1.ReasonRolloutFailed, err.Error(), "", expiresAt)
-		return ctrl.Result{}, err
+	if _, err := r.ensureDeployment(ctx, pe); err != nil {
+		return err
 	}
-
 	if err := r.ensureService(ctx, pe); err != nil {
-		_ = r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse,
-			miragev1alpha1.ReasonRolloutFailed, err.Error(), "", expiresAt)
-		return ctrl.Result{}, err
+		return err
 	}
-
-	url := ""
 	if pe.Spec.Ingress != nil && pe.Spec.Ingress.Enabled {
-		if err := r.ensureIngress(ctx, pe); err != nil {
-			_ = r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse,
-				miragev1alpha1.ReasonRolloutFailed, err.Error(), "", expiresAt)
-			return ctrl.Result{}, err
-		}
-		if pe.Spec.Ingress.Host != "" {
-			url = "http://" + pe.Spec.Ingress.Host
-		}
+		return r.ensureIngress(ctx, pe)
 	}
+	return nil
+}
 
-	ready := deploymentReady(deploy)
-	phase := miragev1alpha1.PhasePending
-	cond := metav1.ConditionFalse
-	reason := miragev1alpha1.ReasonReconciling
-	msg := "Waiting for Deployment to become available"
-	requeue := ctrl.Result{RequeueAfter: requeueFast}
+func previewURL(pe *miragev1alpha1.PreviewEnvironment) string {
+	if pe.Spec.Ingress != nil && pe.Spec.Ingress.Enabled && pe.Spec.Ingress.Host != "" {
+		return "http://" + pe.Spec.Ingress.Host
+	}
+	return ""
+}
 
-	if ready {
+func readinessResult(deploy *appsv1.Deployment, expiresAt *metav1.Time) (phase string, cond metav1.ConditionStatus, reason, msg string, requeue ctrl.Result) {
+	phase = miragev1alpha1.PhasePending
+	cond = metav1.ConditionFalse
+	reason = miragev1alpha1.ReasonReconciling
+	msg = "Waiting for Deployment to become available"
+	requeue = ctrl.Result{RequeueAfter: requeueFast}
+
+	if deploymentReady(deploy) {
 		phase = miragev1alpha1.PhaseReady
 		cond = metav1.ConditionTrue
 		reason = miragev1alpha1.ReasonWorkloadReady
@@ -207,16 +227,14 @@ func (r *PreviewEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.R
 		} else {
 			requeue = ctrl.Result{}
 		}
-	} else if deploymentProgressDeadline(deploy) {
+		return phase, cond, reason, msg, requeue
+	}
+	if deploymentProgressDeadline(deploy) {
 		phase = miragev1alpha1.PhaseFailed
 		reason = miragev1alpha1.ReasonRolloutFailed
 		msg = "Deployment is not progressing; check ImagePullBackOff or crash loops"
 	}
-
-	if err := r.patchStatus(ctx, pe, phase, cond, reason, msg, url, expiresAt); err != nil {
-		return ctrl.Result{}, err
-	}
-	return requeue, nil
+	return phase, cond, reason, msg, requeue
 }
 
 func (r *PreviewEnvironmentReconciler) reconcileDelete(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) (ctrl.Result, error) {
