@@ -1,0 +1,72 @@
+# Full-featured PreviewEnvironment sample for production-style previews.
+# Prefer image digests from CI (see .github/workflows/preview.yml).
+apiVersion: mirage.dev/v1alpha1
+kind: PreviewEnvironment
+metadata:
+  name: pr-42
+  namespace: mirage-system
+  labels:
+    app.kubernetes.io/name: mirage
+    app.kubernetes.io/managed-by: mirage-ci
+    mirage.dev/pr: "42"
+  # Optional AI advisory annotation (written by external job, ignored by reconcile):
+  # annotations:
+  #   mirage.dev/ai-summary: "ImagePullBackOff on ghcr.io/... — check registry auth"
+spec:
+  source:
+    repo: https://github.com/example/app
+    pullRequest: 42
+    commitSHA: 0123456789abcdef0123456789abcdef01234567
+
+  # Prefer digest over mutable tags in production CI.
+  image: ghcr.io/example/app/preview@sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+  targetNamespace: preview-pr-42
+  ttlSeconds: 86400
+  containerPort: 8080
+  replicas: 1
+  backend: direct
+
+  env:
+    - name: APP_ENV
+      value: preview
+    # Do not put secrets inline; mount from Secrets created out-of-band if needed.
+    # - name: DATABASE_URL
+    #   valueFrom:
+    #     secretKeyRef:
+    #       name: preview-pr-42-secrets
+    #       key: database-url
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+  # Probes are not fields on PreviewEnvironment today; the controller applies a
+  # minimal Deployment. When probe overrides are added to the CRD, example:
+  # readinessProbe:
+  #   httpGet:
+  #     path: /healthz
+  #     port: 8080
+  #   initialDelaySeconds: 3
+  #   periodSeconds: 5
+  # livenessProbe:
+  #   httpGet:
+  #     path: /healthz
+  #     port: 8080
+  #   initialDelaySeconds: 10
+  #   periodSeconds: 10
+
+  ingress:
+    enabled: true
+    host: pr-42.preview.example.com
+    ingressClassName: nginx
+    # TLS stub — wire when IngressSpec gains tls/secretName (or annotate the
+    # generated Ingress via a future field). Example desired shape:
+    # tls:
+    #   - hosts:
+    #       - pr-42.preview.example.com
+    #     secretName: pr-42-preview-tls
