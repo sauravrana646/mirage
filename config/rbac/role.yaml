@@ -35,6 +35,16 @@ rules:
   - list
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - delete
+  - get
+  - patch
+  - update
+- apiGroups:
   - apps
   resources:
   - deployments
@@ -84,6 +94,20 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - mirage.dev
+  resources:
+  - previewtemplates
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - mirage.dev
+  resources:
+  - previewtemplates/status
+  verbs:
+  - get
 - apiGroups:
   - networking.k8s.io
   resources:

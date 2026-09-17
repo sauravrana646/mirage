@@ -1,0 +1,36 @@
+apiVersion: mirage.dev/v1alpha1
+kind: PreviewTemplate
+metadata:
+  name: standard-web-app
+  namespace: default
+spec:
+  resources:
+    preset: small
+  networkPolicy: baseline
+  ingress:
+    enabled: true
+    domain: preview.example.com
+    path: /
+    ingressClassName: nginx
+  ttlSeconds: 86400
+  security:
+    profile: restricted
+  replicas: 1
+  containerPort: 8080
+  backend: direct
+---
+apiVersion: mirage.dev/v1alpha1
+kind: PreviewEnvironment
+metadata:
+  name: pr-142
+  namespace: default
+spec:
+  templateRef:
+    name: standard-web-app
+  source:
+    provider: github
+    repo: org/myapp
+    pullRequest: 142
+  image: ghcr.io/org/myapp@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  targetNamespace: preview-pr-142
+  # host derived from template domain when unset: pr-142.preview.example.com

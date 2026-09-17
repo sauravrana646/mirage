@@ -1012,7 +1012,6 @@ spec:
                   type: string
                 type: array
               backend:
-                default: direct
                 enum:
                 - direct
                 - argocd
@@ -1023,9 +1022,52 @@ spec:
                   type: string
                 type: array
               containerPort:
-                default: 8080
                 format: int32
                 type: integer
+              dependencies:
+                description: |-
+                  Dependencies provisions ephemeral postgres/redis/kafka in the target namespace
+                  and injects DATABASE_URL / REDIS_URL / KAFKA_BROKERS into preview app containers.
+                properties:
+                  kafka:
+                    description: KafkaDependencySpec enables an ephemeral Kafka (KRaft,
+                      single-node) for the preview namespace.
+                    properties:
+                      enabled:
+                        type: boolean
+                      version:
+                        description: Version is the image tag (e.g. "3.7"). Defaults
+                          to "3.7".
+                        type: string
+                    type: object
+                  postgres:
+                    description: PostgresDependencySpec enables an ephemeral Postgres
+                      for the preview namespace.
+                    properties:
+                      enabled:
+                        type: boolean
+                      storage:
+                        description: |-
+                          Storage size (e.g. "1Gi"). Reserved for PVC; MVP uses emptyDir only.
+                          Non-empty values are rejected by admission until PVC support lands.
+                        type: string
+                      version:
+                        description: Version is the image tag major/minor (e.g. "16").
+                          Defaults to "16".
+                        type: string
+                    type: object
+                  redis:
+                    description: RedisDependencySpec enables an ephemeral Redis for
+                      the preview namespace.
+                    properties:
+                      enabled:
+                        type: boolean
+                      version:
+                        description: Version is the image tag (e.g. "7.2"). Defaults
+                          to "7.2".
+                        type: string
+                    type: object
+                type: object
               env:
                 items:
                   description: EnvVar represents an environment variable present in
@@ -1189,8 +1231,9 @@ spec:
                   type: object
                 type: array
               image:
-                description: Image is the container image (digest strongly recommended).
-                minLength: 1
+                description: |-
+                  Image is the container image for single-service previews (digest strongly recommended).
+                  Required when services is empty; ignored for named entries in services.
                 type: string
               imagePullPolicy:
                 description: ImagePullPolicy for the preview container (default IfNotPresent;
@@ -1265,8 +1308,8 @@ spec:
                     type: integer
                 type: object
               networkPolicy:
-                default: baseline
-                description: NetworkPolicyMode controls preview NetworkPolicy strictness.
+                description: NetworkPolicy mode. When empty, uses PreviewTemplate
+                  or baseline.
                 enum:
                 - baseline
                 - permissive
@@ -1300,7 +1343,6 @@ spec:
                     type: integer
                 type: object
               replicas:
-                default: 1
                 format: int32
                 maximum: 10
                 minimum: 0
@@ -1368,9 +1410,355 @@ spec:
                       More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
                     type: object
                 type: object
+              runtimeClassName:
+                description: RuntimeClassName for preview pods (overrides template
+                  security.runtimeClassName).
+                type: string
               serviceAccountName:
                 description: ServiceAccountName for preview pods (must exist in targetNamespace).
                 type: string
+              services:
+                description: |-
+                  Services defines multi-service preview workloads. When set, each entry gets its own
+                  Deployment/Service (and optional Ingress). When empty, Image drives a single workload.
+                items:
+                  description: PreviewServiceSpec defines one workload inside a multi-service
+                    preview.
+                  properties:
+                    args:
+                      items:
+                        type: string
+                      type: array
+                    command:
+                      items:
+                        type: string
+                      type: array
+                    env:
+                      items:
+                        description: EnvVar represents an environment variable present
+                          in a Container.
+                        properties:
+                          name:
+                            description: Name of the environment variable. Must be
+                              a C_IDENTIFIER.
+                            type: string
+                          value:
+                            description: |-
+                              Variable references $(VAR_NAME) are expanded
+                              using the previously defined environment variables in the container and
+                              any service environment variables. If a variable cannot be resolved,
+                              the reference in the input string will be unchanged. Double $$ are reduced
+                              to a single $, which allows for escaping the $(VAR_NAME) syntax: i.e.
+                              "$$(VAR_NAME)" will produce the string literal "$(VAR_NAME)".
+                              Escaped references will never be expanded, regardless of whether the variable
+                              exists or not.
+                              Defaults to "".
+                            type: string
+                          valueFrom:
+                            description: Source for the environment variable's value.
+                              Cannot be used if value is not empty.
+                            properties:
+                              configMapKeyRef:
+                                description: Selects a key of a ConfigMap.
+                                properties:
+                                  key:
+                                    description: The key to select.
+                                    type: string
+                                  name:
+                                    default: ""
+                                    description: |-
+                                      Name of the referent.
+                                      This field is effectively required, but due to backwards compatibility is
+                                      allowed to be empty. Instances of this type with an empty value here are
+                                      almost certainly wrong.
+                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                    type: string
+                                  optional:
+                                    description: Specify whether the ConfigMap or
+                                      its key must be defined
+                                    type: boolean
+                                required:
+                                - key
+                                type: object
+                                x-kubernetes-map-type: atomic
+                              fieldRef:
+                                description: |-
+                                  Selects a field of the pod: supports metadata.name, metadata.namespace, `metadata.labels['<KEY>']`, `metadata.annotations['<KEY>']`,
+                                  spec.nodeName, spec.serviceAccountName, status.hostIP, status.podIP, status.podIPs.
+                                properties:
+                                  apiVersion:
+                                    description: Version of the schema the FieldPath
+                                      is written in terms of, defaults to "v1".
+                                    type: string
+                                  fieldPath:
+                                    description: Path of the field to select in the
+                                      specified API version.
+                                    type: string
+                                required:
+                                - fieldPath
+                                type: object
+                                x-kubernetes-map-type: atomic
+                              resourceFieldRef:
+                                description: |-
+                                  Selects a resource of the container: only resources limits and requests
+                                  (limits.cpu, limits.memory, limits.ephemeral-storage, requests.cpu, requests.memory and requests.ephemeral-storage) are currently supported.
+                                properties:
+                                  containerName:
+                                    description: 'Container name: required for volumes,
+                                      optional for env vars'
+                                    type: string
+                                  divisor:
+                                    anyOf:
+                                    - type: integer
+                                    - type: string
+                                    description: Specifies the output format of the
+                                      exposed resources, defaults to "1"
+                                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                                    x-kubernetes-int-or-string: true
+                                  resource:
+                                    description: 'Required: resource to select'
+                                    type: string
+                                required:
+                                - resource
+                                type: object
+                                x-kubernetes-map-type: atomic
+                              secretKeyRef:
+                                description: Selects a key of a secret in the pod's
+                                  namespace
+                                properties:
+                                  key:
+                                    description: The key of the secret to select from.  Must
+                                      be a valid secret key.
+                                    type: string
+                                  name:
+                                    default: ""
+                                    description: |-
+                                      Name of the referent.
+                                      This field is effectively required, but due to backwards compatibility is
+                                      allowed to be empty. Instances of this type with an empty value here are
+                                      almost certainly wrong.
+                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                    type: string
+                                  optional:
+                                    description: Specify whether the Secret or its
+                                      key must be defined
+                                    type: boolean
+                                required:
+                                - key
+                                type: object
+                                x-kubernetes-map-type: atomic
+                            type: object
+                        required:
+                        - name
+                        type: object
+                      type: array
+                    envFrom:
+                      items:
+                        description: EnvFromSource represents the source of a set
+                          of ConfigMaps
+                        properties:
+                          configMapRef:
+                            description: The ConfigMap to select from
+                            properties:
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the ConfigMap must be
+                                  defined
+                                type: boolean
+                            type: object
+                            x-kubernetes-map-type: atomic
+                          prefix:
+                            description: An optional identifier to prepend to each
+                              key in the ConfigMap. Must be a C_IDENTIFIER.
+                            type: string
+                          secretRef:
+                            description: The Secret to select from
+                            properties:
+                              name:
+                                default: ""
+                                description: |-
+                                  Name of the referent.
+                                  This field is effectively required, but due to backwards compatibility is
+                                  allowed to be empty. Instances of this type with an empty value here are
+                                  almost certainly wrong.
+                                  More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                type: string
+                              optional:
+                                description: Specify whether the Secret must be defined
+                                type: boolean
+                            type: object
+                            x-kubernetes-map-type: atomic
+                        type: object
+                      type: array
+                    image:
+                      description: Image is the container image (digest strongly recommended).
+                      minLength: 1
+                      type: string
+                    imagePullPolicy:
+                      description: PullPolicy describes a policy for if/when to pull
+                        a container image
+                      enum:
+                      - Always
+                      - IfNotPresent
+                      - Never
+                      type: string
+                    ingress:
+                      description: Ingress exposes this service. When omitted, top-level
+                        ingress applies only to the primary service.
+                      properties:
+                        annotations:
+                          additionalProperties:
+                            type: string
+                          type: object
+                        enabled:
+                          type: boolean
+                        host:
+                          type: string
+                        ingressClassName:
+                          type: string
+                        path:
+                          type: string
+                        tls:
+                          description: TLSSpec configures optional Ingress TLS.
+                          properties:
+                            enabled:
+                              type: boolean
+                            secretName:
+                              description: SecretName for the TLS certificate (cert-manager
+                                can create it).
+                              type: string
+                          type: object
+                      type: object
+                    livenessProbe:
+                      description: ProbeSpec is a simplified HTTP probe.
+                      properties:
+                        initialDelaySeconds:
+                          default: 10
+                          format: int32
+                          type: integer
+                        path:
+                          default: /
+                          type: string
+                        periodSeconds:
+                          default: 10
+                          format: int32
+                          type: integer
+                        port:
+                          default: 8080
+                          format: int32
+                          type: integer
+                      type: object
+                    name:
+                      description: Name is the service identity (DNS-1123 label).
+                        Used for Deployment/Service names.
+                      maxLength: 63
+                      minLength: 1
+                      type: string
+                    port:
+                      description: Port is the container port (defaults to template/preview
+                        containerPort or 8080).
+                      format: int32
+                      type: integer
+                    readinessProbe:
+                      description: ProbeSpec is a simplified HTTP probe.
+                      properties:
+                        initialDelaySeconds:
+                          default: 10
+                          format: int32
+                          type: integer
+                        path:
+                          default: /
+                          type: string
+                        periodSeconds:
+                          default: 10
+                          format: int32
+                          type: integer
+                        port:
+                          default: 8080
+                          format: int32
+                          type: integer
+                      type: object
+                    replicas:
+                      format: int32
+                      maximum: 10
+                      minimum: 0
+                      type: integer
+                    resources:
+                      description: ResourceRequirements describes the compute resource
+                        requirements.
+                      properties:
+                        claims:
+                          description: |-
+                            Claims lists the names of resources, defined in spec.resourceClaims,
+                            that are used by this container.
+
+                            This is an alpha field and requires enabling the
+                            DynamicResourceAllocation feature gate.
+
+                            This field is immutable. It can only be set for containers.
+                          items:
+                            description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                            properties:
+                              name:
+                                description: |-
+                                  Name must match the name of one entry in pod.spec.resourceClaims of
+                                  the Pod where this field is used. It makes that resource available
+                                  inside a container.
+                                type: string
+                              request:
+                                description: |-
+                                  Request is the name chosen for a request in the referenced claim.
+                                  If empty, everything from the claim is made available, otherwise
+                                  only the result of this request.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - name
+                          x-kubernetes-list-type: map
+                        limits:
+                          additionalProperties:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          description: |-
+                            Limits describes the maximum amount of compute resources allowed.
+                            More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                          type: object
+                        requests:
+                          additionalProperties:
+                            anyOf:
+                            - type: integer
+                            - type: string
+                            pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                            x-kubernetes-int-or-string: true
+                          description: |-
+                            Requests describes the minimum amount of compute resources required.
+                            If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                            otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                            More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                          type: object
+                      type: object
+                  required:
+                  - image
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               source:
                 description: SourceSpec identifies the git/PR/MR origin of a preview.
                 properties:
@@ -1410,6 +1798,22 @@ spec:
                 description: TargetNamespace is immutable after create.
                 minLength: 1
                 type: string
+              templateRef:
+                description: |-
+                  TemplateRef applies platform defaults from a PreviewTemplate.
+                  Explicit PreviewEnvironment fields override the template.
+                properties:
+                  name:
+                    description: Name of the PreviewTemplate.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: Namespace of the PreviewTemplate. Defaults to the
+                      PreviewEnvironment namespace.
+                    type: string
+                required:
+                - name
+                type: object
               terminationGracePeriodSeconds:
                 description: TerminationGracePeriodSeconds for preview pods.
                 format: int64
@@ -1469,7 +1873,6 @@ spec:
                 description: Labels merged onto owned workloads.
                 type: object
             required:
-            - image
             - targetNamespace
             type: object
           status:
@@ -1548,6 +1951,36 @@ spec:
                 type: string
               replicaStatus:
                 type: string
+              services:
+                description: Services reports per-service readiness for multi-service
+                  previews.
+                items:
+                  description: ServiceStatus reports observed state for one preview
+                    service.
+                  properties:
+                    message:
+                      type: string
+                    name:
+                      description: Name of the service.
+                      minLength: 1
+                      type: string
+                    ready:
+                      type: boolean
+                    replicas:
+                      type: string
+                    url:
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              template:
+                description: TemplateRef records the resolved template name when templateRef
+                  was used.
+                type: string
               url:
                 type: string
             type: object
@@ -1556,6 +1989,9 @@ spec:
         - message: targetNamespace is immutable
           rule: '!has(oldSelf.spec.targetNamespace) || self.spec.targetNamespace ==
             oldSelf.spec.targetNamespace'
+        - message: spec.image or spec.services is required
+          rule: (has(self.spec.image) && self.spec.image != "") || (has(self.spec.services)
+            && size(self.spec.services) > 0)
     served: true
     storage: true
     subresources:

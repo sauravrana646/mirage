@@ -1,0 +1,28 @@
+apiVersion: mirage.dev/v1alpha1
+kind: PreviewEnvironment
+metadata:
+  name: pr-142-multi
+  namespace: default
+spec:
+  templateRef:
+    name: standard-web-app
+  source:
+    provider: github
+    repo: org/myapp
+    pullRequest: 142
+  targetNamespace: preview-pr-142-multi
+  services:
+    - name: api
+      image: ghcr.io/org/myapp-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      port: 8080
+    - name: frontend
+      image: ghcr.io/org/myapp-web@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      port: 3000
+      ingress:
+        enabled: true
+        host: frontend-pr-142.preview.example.com
+        ingressClassName: nginx
+    - name: worker
+      image: ghcr.io/org/myapp-worker@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+      port: 8080
+      replicas: 1

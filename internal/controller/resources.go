@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -34,26 +35,76 @@ import (
 	miragev1alpha1 "github.com/sauravrana646/mirage/api/v1alpha1"
 )
 
-func (r *PreviewEnvironmentReconciler) ensureChildren(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
+const (
+	networkPolicyBaselineName     = "mirage-baseline"
+	networkPolicyDependenciesName = "mirage-dependencies"
+	previewComponent              = "preview"
+)
+
+func (r *PreviewEnvironmentReconciler) ensureChildren(ctx context.Context, resolved *resolvedPreview) error {
+	pe := resolved.PE
 	if err := r.ensureLimitRange(ctx, pe); err != nil {
 		return err
 	}
 	if err := r.ensureResourceQuota(ctx, pe); err != nil {
 		return err
 	}
-	if err := r.ensureNetworkPolicy(ctx, pe); err != nil {
+	if err := r.ensureNetworkPolicy(ctx, resolved); err != nil {
 		return err
 	}
-	if _, err := r.ensureDeployment(ctx, pe); err != nil {
+	if err := r.ensureDependencies(ctx, pe); err != nil {
 		return err
 	}
-	if err := r.ensureService(ctx, pe); err != nil {
+	desiredNames := map[string]struct{}{}
+	for _, svc := range resolved.Services {
+		desiredNames[svc.WorkloadName] = struct{}{}
+		if _, err := r.ensureServiceDeployment(ctx, resolved, svc); err != nil {
+			return err
+		}
+		if err := r.ensureServiceService(ctx, pe, svc); err != nil {
+			return err
+		}
+		if svc.Ingress != nil && svc.Ingress.Enabled {
+			if err := r.ensureServiceIngress(ctx, pe, svc); err != nil {
+				return err
+			}
+		} else if err := r.deleteNamedIngress(ctx, pe.Spec.TargetNamespace, svc.WorkloadName); err != nil {
+			return err
+		}
+	}
+	return r.pruneStaleWorkloads(ctx, pe, desiredNames)
+}
+
+func (r *PreviewEnvironmentReconciler) pruneStaleWorkloads(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment, desired map[string]struct{}) error {
+	ns := pe.Spec.TargetNamespace
+	var deploys appsv1.DeploymentList
+	if err := r.List(ctx, &deploys, client.InNamespace(ns), client.MatchingLabels{
+		miragev1alpha1.LabelManagedBy: miragev1alpha1.ManagedByValue,
+		miragev1alpha1.LabelOwnerUID:  string(pe.UID),
+	}); err != nil {
 		return err
 	}
-	if pe.Spec.Ingress != nil && pe.Spec.Ingress.Enabled {
-		return r.ensureIngress(ctx, pe)
+	var errs []error
+	for i := range deploys.Items {
+		d := &deploys.Items[i]
+		// Ephemeral dependencies are managed separately (component=dependency / LabelDependency).
+		if d.Labels[componentLabel] == depComponent || d.Labels[miragev1alpha1.LabelDependency] != "" {
+			continue
+		}
+		if _, ok := desired[d.Name]; ok {
+			continue
+		}
+		if err := r.deleteIgnoreNotFound(ctx, d); err != nil {
+			errs = append(errs, err)
+		}
+		if err := r.deleteIgnoreNotFound(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: d.Name, Namespace: ns}}); err != nil {
+			errs = append(errs, err)
+		}
+		if err := r.deleteIgnoreNotFound(ctx, &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: d.Name, Namespace: ns}}); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return r.deleteIngressIfPresent(ctx, pe)
+	return errors.Join(errs...)
 }
 
 func (r *PreviewEnvironmentReconciler) cleanupTarget(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
@@ -95,7 +146,10 @@ func ownsNamespace(pe *miragev1alpha1.PreviewEnvironment, ns *corev1.Namespace) 
 	return ns.Labels[miragev1alpha1.LabelOwnerUID] == string(pe.UID)
 }
 
-func (r *PreviewEnvironmentReconciler) ensureNamespace(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
+func (r *PreviewEnvironmentReconciler) ensureNamespace(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment, psa string) error {
+	if psa == "" {
+		psa = string(miragev1alpha1.SecurityProfileRestricted)
+	}
 	ns := &corev1.Namespace{}
 	err := r.Get(ctx, types.NamespacedName{Name: pe.Spec.TargetNamespace}, ns)
 	if apierrors.IsNotFound(err) {
@@ -107,9 +161,9 @@ func (r *PreviewEnvironmentReconciler) ensureNamespace(ctx context.Context, pe *
 					miragev1alpha1.LabelOwnerUID:         string(pe.UID),
 					miragev1alpha1.LabelOwnerName:        pe.Name,
 					miragev1alpha1.LabelOwnerNamespace:   pe.Namespace,
-					"pod-security.kubernetes.io/enforce": "restricted",
-					"pod-security.kubernetes.io/warn":    "restricted",
-					"pod-security.kubernetes.io/audit":   "restricted",
+					"pod-security.kubernetes.io/enforce": psa,
+					"pod-security.kubernetes.io/warn":    psa,
+					"pod-security.kubernetes.io/audit":   psa,
 				},
 			},
 		}
@@ -121,28 +175,66 @@ func (r *PreviewEnvironmentReconciler) ensureNamespace(ctx context.Context, pe *
 	if !ownsNamespace(pe, ns) {
 		return &namespaceConflictError{name: ns.Name}
 	}
-	return nil
+	// Reconcile PSA labels on existing owned namespaces (create path sets them once).
+	if ns.Labels == nil {
+		ns.Labels = map[string]string{}
+	}
+	psaKeys := []string{
+		"pod-security.kubernetes.io/enforce",
+		"pod-security.kubernetes.io/warn",
+		"pod-security.kubernetes.io/audit",
+	}
+	changed := false
+	for _, k := range psaKeys {
+		if ns.Labels[k] != psa {
+			ns.Labels[k] = psa
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return r.Update(ctx, ns)
 }
 
-func (r *PreviewEnvironmentReconciler) workloadLabels(pe *miragev1alpha1.PreviewEnvironment) map[string]string {
-	labels := map[string]string{
-		appLabel:                           pe.Name,
-		componentLabel:                     "preview",
-		miragev1alpha1.LabelManagedBy:      miragev1alpha1.ManagedByValue,
-		miragev1alpha1.LabelOwnerUID:       string(pe.UID),
-		miragev1alpha1.LabelOwnerName:      pe.Name,
-		miragev1alpha1.LabelOwnerNamespace: pe.Namespace,
-	}
+func (r *PreviewEnvironmentReconciler) workloadLabels(pe *miragev1alpha1.PreviewEnvironment, serviceName string) map[string]string {
+	labels := make(map[string]string, len(pe.Spec.WorkloadLabels)+7)
 	for k, v := range pe.Spec.WorkloadLabels {
+		if isReservedWorkloadLabel(k) {
+			continue
+		}
 		labels[k] = v
 	}
+	// Mirage-owned labels must always win.
+	labels[appLabel] = pe.Name
+	labels[componentLabel] = previewComponent
+	labels[miragev1alpha1.LabelManagedBy] = miragev1alpha1.ManagedByValue
+	labels[miragev1alpha1.LabelOwnerUID] = string(pe.UID)
+	labels[miragev1alpha1.LabelOwnerName] = pe.Name
+	labels[miragev1alpha1.LabelOwnerNamespace] = pe.Namespace
+	labels[miragev1alpha1.LabelService] = serviceName
 	return labels
+}
+
+func isReservedWorkloadLabel(key string) bool {
+	switch key {
+	case appLabel, componentLabel,
+		miragev1alpha1.LabelManagedBy,
+		miragev1alpha1.LabelOwnerUID,
+		miragev1alpha1.LabelOwnerName,
+		miragev1alpha1.LabelOwnerNamespace,
+		miragev1alpha1.LabelService,
+		miragev1alpha1.LabelDependency:
+		return true
+	default:
+		return false
+	}
 }
 
 func (r *PreviewEnvironmentReconciler) ensureLimitRange(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
 	lr := &corev1.LimitRange{ObjectMeta: metav1.ObjectMeta{Name: "mirage-defaults", Namespace: pe.Spec.TargetNamespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, lr, func() error {
-		lr.Labels = r.workloadLabels(pe)
+		lr.Labels = r.workloadLabels(pe, pe.Name)
 		lr.Spec.Limits = []corev1.LimitRangeItem{{
 			Type: corev1.LimitTypeContainer,
 			Default: corev1.ResourceList{
@@ -163,7 +255,7 @@ func (r *PreviewEnvironmentReconciler) ensureLimitRange(ctx context.Context, pe 
 func (r *PreviewEnvironmentReconciler) ensureResourceQuota(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
 	rq := &corev1.ResourceQuota{ObjectMeta: metav1.ObjectMeta{Name: "mirage-quota", Namespace: pe.Spec.TargetNamespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, rq, func() error {
-		rq.Labels = r.workloadLabels(pe)
+		rq.Labels = r.workloadLabels(pe, pe.Name)
 		rq.Spec.Hard = corev1.ResourceList{
 			corev1.ResourceRequestsCPU: resource.MustParse("2"), corev1.ResourceRequestsMemory: resource.MustParse("2Gi"),
 			corev1.ResourceLimitsCPU: resource.MustParse("4"), corev1.ResourceLimitsMemory: resource.MustParse("4Gi"),
@@ -174,30 +266,137 @@ func (r *PreviewEnvironmentReconciler) ensureResourceQuota(ctx context.Context, 
 	return err
 }
 
-func (r *PreviewEnvironmentReconciler) ensureNetworkPolicy(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
+func (r *PreviewEnvironmentReconciler) ensureNetworkPolicy(ctx context.Context, resolved *resolvedPreview) error {
+	pe := resolved.PE
 	mode := pe.Spec.NetworkPolicy
 	if mode == "" {
 		mode = miragev1alpha1.NetworkPolicyBaseline
 	}
 	if mode == miragev1alpha1.NetworkPolicyDisabled {
-		np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: "mirage-baseline", Namespace: pe.Spec.TargetNamespace}}
-		_ = r.Delete(ctx, np)
-		return nil
+		var errs []error
+		for _, name := range []string{networkPolicyBaselineName, networkPolicyDependenciesName} {
+			np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: pe.Spec.TargetNamespace}}
+			if err := r.deleteIgnoreNotFound(ctx, np); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
 	}
-	port := pe.Spec.ContainerPort
-	if port == 0 {
-		port = defaultContainerPort
+	ports := make([]networkingv1.NetworkPolicyPort, 0, len(resolved.Services))
+	seen := map[int32]struct{}{}
+	for _, svc := range resolved.Services {
+		if _, ok := seen[svc.Port]; ok {
+			continue
+		}
+		seen[svc.Port] = struct{}{}
+		ports = append(ports, networkingv1.NetworkPolicyPort{
+			Protocol: protocolPtr(corev1.ProtocolTCP), Port: intstrPtr(svc.Port),
+		})
 	}
-	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: "mirage-baseline", Namespace: pe.Spec.TargetNamespace}}
+	if len(ports) == 0 {
+		ports = []networkingv1.NetworkPolicyPort{{
+			Protocol: protocolPtr(corev1.ProtocolTCP), Port: intstrPtr(defaultContainerPort),
+		}}
+	}
+	np := &networkingv1.NetworkPolicy{ObjectMeta: metav1.ObjectMeta{Name: networkPolicyBaselineName, Namespace: pe.Spec.TargetNamespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
-		np.Labels = r.workloadLabels(pe)
+		np.Labels = r.workloadLabels(pe, pe.Name)
 		np.Spec.PodSelector = metav1.LabelSelector{MatchLabels: map[string]string{appLabel: pe.Name}}
 		np.Spec.PolicyTypes = []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}
+		// Ingress from ingress-controller namespaces and same-preview app pods (frontend→api).
 		np.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{{
-			Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocolPtr(corev1.ProtocolTCP), Port: intstrPtr(port)}},
+			Ports: ports,
+			From: []networkingv1.NetworkPolicyPeer{
+				{
+					NamespaceSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{"mirage.dev/ingress-access": "true"},
+					},
+				},
+				{
+					PodSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							miragev1alpha1.LabelOwnerUID: string(pe.UID),
+							componentLabel:               previewComponent,
+						},
+					},
+				},
+			},
+		}}
+		if mode == miragev1alpha1.NetworkPolicyPermissive {
+			np.Spec.Egress = []networkingv1.NetworkPolicyEgressRule{{}}
+		} else {
+			egress := []networkingv1.NetworkPolicyEgressRule{{
+				Ports: []networkingv1.NetworkPolicyPort{
+					{Protocol: protocolPtr(corev1.ProtocolUDP), Port: intstrPtr(53)},
+					{Protocol: protocolPtr(corev1.ProtocolTCP), Port: intstrPtr(53)},
+				},
+			}}
+			// Same-preview app↔app (frontend→api): NP requires matching ingress+egress peers.
+			egress = append(egress, networkingv1.NetworkPolicyEgressRule{
+				To: []networkingv1.NetworkPolicyPeer{{
+					PodSelector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							miragev1alpha1.LabelOwnerUID: string(pe.UID),
+							componentLabel:               previewComponent,
+						},
+					},
+				}},
+				Ports: ports,
+			})
+			// Allow preview pods to reach in-namespace dependencies.
+			if deps := enabledDependencyKinds(pe.Spec.Dependencies); len(deps) > 0 {
+				depPorts := make([]networkingv1.NetworkPolicyPort, 0, len(deps))
+				for _, d := range deps {
+					depPorts = append(depPorts, networkingv1.NetworkPolicyPort{
+						Protocol: protocolPtr(corev1.ProtocolTCP), Port: intstrPtr(d.Port),
+					})
+				}
+				egress = append(egress, networkingv1.NetworkPolicyEgressRule{
+					To: []networkingv1.NetworkPolicyPeer{{
+						PodSelector: &metav1.LabelSelector{
+							MatchLabels: map[string]string{componentLabel: depComponent},
+						},
+					}},
+					Ports: depPorts,
+				})
+			}
+			np.Spec.Egress = egress
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return r.ensureDependencyNetworkPolicy(ctx, pe, mode)
+}
+
+// ensureDependencyNetworkPolicy isolates dependency pods: ingress only from preview app
+// pods (not other deps), egress DNS-only in baseline mode.
+func (r *PreviewEnvironmentReconciler) ensureDependencyNetworkPolicy(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment, mode miragev1alpha1.NetworkPolicyMode) error {
+	ns := pe.Spec.TargetNamespace
+	npMeta := metav1.ObjectMeta{Name: networkPolicyDependenciesName, Namespace: ns}
+	if !dependenciesEnabled(pe.Spec.Dependencies) {
+		return r.deleteIgnoreNotFound(ctx, &networkingv1.NetworkPolicy{ObjectMeta: npMeta})
+	}
+	np := &networkingv1.NetworkPolicy{ObjectMeta: npMeta}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
+		np.Labels = r.workloadLabels(pe, pe.Name)
+		np.Spec.PodSelector = metav1.LabelSelector{MatchLabels: map[string]string{componentLabel: depComponent}}
+		np.Spec.PolicyTypes = []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}
+		depPorts := make([]networkingv1.NetworkPolicyPort, 0)
+		for _, d := range enabledDependencyKinds(pe.Spec.Dependencies) {
+			depPorts = append(depPorts, networkingv1.NetworkPolicyPort{
+				Protocol: protocolPtr(corev1.ProtocolTCP), Port: intstrPtr(d.Port),
+			})
+		}
+		np.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{{
+			Ports: depPorts,
 			From: []networkingv1.NetworkPolicyPeer{{
-				NamespaceSelector: &metav1.LabelSelector{
-					MatchLabels: map[string]string{"mirage.dev/ingress-access": "true"},
+				PodSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{
+						miragev1alpha1.LabelOwnerUID: string(pe.UID),
+						componentLabel:               previewComponent,
+					},
 				},
 			}},
 		}}
@@ -224,22 +423,19 @@ func intstrPtr(port int32) *intstr.IntOrString {
 func boolPtr(v bool) *bool    { return &v }
 func int32Ptr(v int32) *int32 { return &v }
 
-func (r *PreviewEnvironmentReconciler) ensureDeployment(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) (*appsv1.Deployment, error) {
-	replicas := defaultReplicas
-	if pe.Spec.Replicas != nil {
-		replicas = *pe.Spec.Replicas
-	}
-	port := pe.Spec.ContainerPort
-	if port == 0 {
-		port = defaultContainerPort
-	}
-	labels := r.workloadLabels(pe)
-	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: pe.Name, Namespace: pe.Spec.TargetNamespace}}
+func (r *PreviewEnvironmentReconciler) ensureServiceDeployment(ctx context.Context, resolved *resolvedPreview, svc effectiveService) (*appsv1.Deployment, error) {
+	pe := resolved.PE
+	labels := r.workloadLabels(pe, svc.Name)
+	deploy := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: svc.WorkloadName, Namespace: pe.Spec.TargetNamespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
 		deploy.Labels = labels
+		replicas := svc.Replicas
 		deploy.Spec.Replicas = &replicas
 		if deploy.Spec.Selector == nil {
-			deploy.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{appLabel: pe.Name}}
+			deploy.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{
+				appLabel:                    pe.Name,
+				miragev1alpha1.LabelService: svc.Name,
+			}}
 		}
 		deploy.Spec.Template.ObjectMeta.Labels = labels
 		if pe.Spec.WorkloadAnnotations != nil {
@@ -247,9 +443,11 @@ func (r *PreviewEnvironmentReconciler) ensureDeployment(ctx context.Context, pe 
 		}
 		automount := false
 		container := corev1.Container{
-			Name: "app", Image: pe.Spec.Image, Env: pe.Spec.Env, EnvFrom: pe.Spec.EnvFrom,
-			Command: pe.Spec.Command, Args: pe.Spec.Args, Resources: pe.Spec.Resources,
-			Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: port}},
+			Name: "app", Image: svc.Image,
+			Env:     mergeEnvPreferUser(svc.Env, dependencyEnvVars(pe.Spec.Dependencies)),
+			EnvFrom: svc.EnvFrom,
+			Command: svc.Command, Args: svc.Args, Resources: svc.Resources,
+			Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: svc.Port}},
 			SecurityContext: &corev1.SecurityContext{
 				AllowPrivilegeEscalation: boolPtr(false),
 				RunAsNonRoot:             boolPtr(true),
@@ -257,14 +455,14 @@ func (r *PreviewEnvironmentReconciler) ensureDeployment(ctx context.Context, pe 
 				SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
 		}
-		if pe.Spec.ImagePullPolicy != "" {
-			container.ImagePullPolicy = pe.Spec.ImagePullPolicy
+		if svc.ImagePullPolicy != "" {
+			container.ImagePullPolicy = svc.ImagePullPolicy
 		}
-		if pe.Spec.ReadinessProbe != nil {
-			container.ReadinessProbe = httpProbe(pe.Spec.ReadinessProbe, port)
+		if svc.ReadinessProbe != nil {
+			container.ReadinessProbe = httpProbe(svc.ReadinessProbe, svc.Port)
 		}
-		if pe.Spec.LivenessProbe != nil {
-			container.LivenessProbe = httpProbe(pe.Spec.LivenessProbe, port)
+		if svc.LivenessProbe != nil {
+			container.LivenessProbe = httpProbe(svc.LivenessProbe, svc.Port)
 		}
 		deploy.Spec.Template.Spec.AutomountServiceAccountToken = &automount
 		deploy.Spec.Template.Spec.Containers = []corev1.Container{container}
@@ -274,6 +472,10 @@ func (r *PreviewEnvironmentReconciler) ensureDeployment(ctx context.Context, pe 
 		deploy.Spec.Template.Spec.NodeSelector = pe.Spec.NodeSelector
 		deploy.Spec.Template.Spec.Tolerations = pe.Spec.Tolerations
 		deploy.Spec.Template.Spec.Affinity = pe.Spec.Affinity
+		if resolved.RuntimeClassName != "" {
+			rc := resolved.RuntimeClassName
+			deploy.Spec.Template.Spec.RuntimeClassName = &rc
+		}
 		if pe.Spec.TerminationGracePeriodSeconds != nil {
 			deploy.Spec.Template.Spec.TerminationGracePeriodSeconds = pe.Spec.TerminationGracePeriodSeconds
 		}
@@ -319,57 +521,58 @@ func httpProbe(p *miragev1alpha1.ProbeSpec, defaultPort int32) *corev1.Probe {
 	}
 }
 
-func (r *PreviewEnvironmentReconciler) ensureService(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
-	port := pe.Spec.ContainerPort
-	if port == 0 {
-		port = defaultContainerPort
-	}
-	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: pe.Name, Namespace: pe.Spec.TargetNamespace}}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
-		svc.Labels = r.workloadLabels(pe)
-		svc.Spec.Selector = map[string]string{appLabel: pe.Name}
-		svc.Spec.Ports = []corev1.ServicePort{{
-			Name: "http", Port: 80, TargetPort: intstr.FromInt32(port), Protocol: corev1.ProtocolTCP,
+func (r *PreviewEnvironmentReconciler) ensureServiceService(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment, svc effectiveService) error {
+	svcObj := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: svc.WorkloadName, Namespace: pe.Spec.TargetNamespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svcObj, func() error {
+		svcObj.Labels = r.workloadLabels(pe, svc.Name)
+		svcObj.Spec.Selector = map[string]string{
+			appLabel:                    pe.Name,
+			miragev1alpha1.LabelService: svc.Name,
+		}
+		svcObj.Spec.Ports = []corev1.ServicePort{{
+			Name: "http", Port: 80, TargetPort: intstr.FromInt32(svc.Port), Protocol: corev1.ProtocolTCP,
 		}}
 		return nil
 	})
 	return err
 }
 
-func (r *PreviewEnvironmentReconciler) ensureIngress(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
-	if pe.Spec.Ingress == nil || pe.Spec.Ingress.Host == "" {
-		return fmt.Errorf("ingress.enabled requires ingress.host")
+func (r *PreviewEnvironmentReconciler) ensureServiceIngress(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment, svc effectiveService) error {
+	if svc.Ingress == nil || svc.Ingress.Host == "" {
+		return fmt.Errorf("ingress.enabled requires ingress.host for service %q", svc.Name)
 	}
-	path := pe.Spec.Ingress.Path
+	path := svc.Ingress.Path
 	if path == "" {
 		path = "/"
 	}
 	pathType := networkingv1.PathTypePrefix
-	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: pe.Name, Namespace: pe.Spec.TargetNamespace}}
+	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: svc.WorkloadName, Namespace: pe.Spec.TargetNamespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ing, func() error {
-		ing.Labels = r.workloadLabels(pe)
-		ing.Annotations = pe.Spec.Ingress.Annotations
+		ing.Labels = r.workloadLabels(pe, svc.Name)
+		ing.Annotations = svc.Ingress.Annotations
 		if ing.Annotations == nil {
 			ing.Annotations = map[string]string{}
 		}
-		ing.Spec.IngressClassName = pe.Spec.Ingress.IngressClassName
+		ing.Spec.IngressClassName = svc.Ingress.IngressClassName
 		ing.Spec.Rules = []networkingv1.IngressRule{{
-			Host: pe.Spec.Ingress.Host,
+			Host: svc.Ingress.Host,
 			IngressRuleValue: networkingv1.IngressRuleValue{HTTP: &networkingv1.HTTPIngressRuleValue{
 				Paths: []networkingv1.HTTPIngressPath{{
 					Path: path, PathType: &pathType,
 					Backend: networkingv1.IngressBackend{
-						Service: &networkingv1.IngressServiceBackend{Name: pe.Name, Port: networkingv1.ServiceBackendPort{Name: "http"}},
+						Service: &networkingv1.IngressServiceBackend{
+							Name: svc.WorkloadName, Port: networkingv1.ServiceBackendPort{Name: "http"},
+						},
 					},
 				}},
 			}},
 		}}
-		if pe.Spec.Ingress.TLS != nil && pe.Spec.Ingress.TLS.Enabled {
-			secret := pe.Spec.Ingress.TLS.SecretName
+		if svc.Ingress.TLS != nil && svc.Ingress.TLS.Enabled {
+			secret := svc.Ingress.TLS.SecretName
 			if secret == "" {
-				secret = pe.Name + "-tls"
+				secret = svc.WorkloadName + "-tls"
 			}
-			ing.Spec.TLS = []networkingv1.IngressTLS{{Hosts: []string{pe.Spec.Ingress.Host}, SecretName: secret}}
+			ing.Spec.TLS = []networkingv1.IngressTLS{{Hosts: []string{svc.Ingress.Host}, SecretName: secret}}
 		} else {
 			ing.Spec.TLS = nil
 		}
@@ -378,12 +581,8 @@ func (r *PreviewEnvironmentReconciler) ensureIngress(ctx context.Context, pe *mi
 	return err
 }
 
-func (r *PreviewEnvironmentReconciler) deleteIngressIfPresent(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
-	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: pe.Name, Namespace: pe.Spec.TargetNamespace}}
-	if err := r.Delete(ctx, ing); err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	return nil
+func (r *PreviewEnvironmentReconciler) deleteNamedIngress(ctx context.Context, ns, name string) error {
+	return r.deleteIgnoreNotFound(ctx, &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}})
 }
 
 // cleanupDirectWorkloads removes Deployment/Service/Ingress when switching away from the direct backend.
@@ -392,16 +591,42 @@ func (r *PreviewEnvironmentReconciler) cleanupDirectWorkloads(ctx context.Contex
 	if ns == "" {
 		return nil
 	}
+	var deploys appsv1.DeploymentList
+	if err := r.List(ctx, &deploys, client.InNamespace(ns), client.MatchingLabels{
+		miragev1alpha1.LabelManagedBy: miragev1alpha1.ManagedByValue,
+		miragev1alpha1.LabelOwnerUID:  string(pe.UID),
+	}); err != nil {
+		return err
+	}
+	var errs []error
+	for i := range deploys.Items {
+		d := &deploys.Items[i]
+		if err := r.deleteIgnoreNotFound(ctx, d); err != nil {
+			errs = append(errs, err)
+		}
+		if err := r.deleteIgnoreNotFound(ctx, &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: d.Name, Namespace: ns}}); err != nil {
+			errs = append(errs, err)
+		}
+		if err := r.deleteIgnoreNotFound(ctx, &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: d.Name, Namespace: ns}}); err != nil {
+			errs = append(errs, err)
+		}
+		if d.Labels[componentLabel] == depComponent || d.Labels[miragev1alpha1.LabelDependency] != "" {
+			if err := r.deleteIgnoreNotFound(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: d.Name, Namespace: ns}}); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	// Legacy single-name cleanup if labels were not yet present.
 	for _, obj := range []client.Object{
 		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: pe.Name, Namespace: ns}},
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: pe.Name, Namespace: ns}},
 		&networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: pe.Name, Namespace: ns}},
 	} {
-		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
-			return err
+		if err := r.deleteIgnoreNotFound(ctx, obj); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (r *PreviewEnvironmentReconciler) imagePullMessage(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) string {
@@ -420,4 +645,22 @@ func (r *PreviewEnvironmentReconciler) imagePullMessage(ctx context.Context, pe 
 		}
 	}
 	return ""
+}
+
+func serviceURL(svc effectiveService) string {
+	if svc.Ingress == nil || !svc.Ingress.Enabled || svc.Ingress.Host == "" {
+		return ""
+	}
+	scheme := "http"
+	if svc.Ingress.TLS != nil && svc.Ingress.TLS.Enabled {
+		scheme = "https"
+	}
+	path := svc.Ingress.Path
+	if path == "" || path == "/" {
+		return scheme + "://" + svc.Ingress.Host
+	}
+	if path[0] != '/' {
+		path = "/" + path
+	}
+	return scheme + "://" + svc.Ingress.Host + path
 }

@@ -1,0 +1,35 @@
+apiVersion: mirage.dev/v1alpha1
+kind: PreviewEnvironment
+metadata:
+  labels:
+    app.kubernetes.io/name: mirage
+    app.kubernetes.io/managed-by: kustomize
+  name: preview-with-deps
+  namespace: default
+spec:
+  image: nginxinc/nginx-unprivileged:1.27-alpine
+  targetNamespace: preview-with-deps
+  containerPort: 8080
+  replicas: 1
+  ttlSeconds: 3600
+  backend: direct
+  # Ephemeral in-namespace dependencies (Deployments/Services named mirage-dep-*).
+  # Injects DATABASE_URL / REDIS_URL via Secret secretKeyRef; KAFKA_BROKERS as host:port.
+  dependencies:
+    postgres:
+      enabled: true
+      version: "16"
+      # storage: "1Gi"  # reserved; MVP uses emptyDir
+      # Credentials: Secret mirage-dep-postgres (random password, preserved across reconciles)
+    redis:
+      enabled: true
+      version: "7.2"
+      # Credentials: Secret mirage-dep-redis
+    # kafka:
+    #   enabled: true
+    #   version: "3.7"
+    #   # Service: mirage-dep-kafka:9092
+  # ingress:
+  #   enabled: true
+  #   host: preview-with-deps.127.0.0.1.nip.io
+  #   ingressClassName: nginx

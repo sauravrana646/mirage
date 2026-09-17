@@ -44,28 +44,86 @@ const (
 	// DefaultArgoNamespace is where Application CRs live when unspecified.
 	DefaultArgoNamespace = "argocd"
 
-	ConditionReady       = "Ready"
-	ConditionProgressing = "Progressing"
-	ConditionExpired     = "Expired"
+	ConditionReady             = "Ready"
+	ConditionProgressing       = "Progressing"
+	ConditionExpired           = "Expired"
+	ConditionNamespaceReady    = "NamespaceReady"
+	ConditionWorkloadReady     = "WorkloadReady"
+	ConditionNetworkReady      = "NetworkReady"
+	ConditionRouteReady        = "RouteReady"
+	ConditionDependenciesReady = "DependenciesReady"
 
-	PhasePending  = "Pending"
-	PhaseReady    = "Ready"
-	PhaseFailed   = "Failed"
-	PhaseExpiring = "Expiring"
-	PhasePaused   = "Paused"
+	PhasePending      = "Pending"
+	PhaseProvisioning = "Provisioning"
+	PhaseReady        = "Ready"
+	PhaseFailed       = "Failed"
+	PhaseExpiring     = "Expiring"
+	PhasePaused       = "Paused"
 
-	ReasonWorkloadReady     = "WorkloadReady"
-	ReasonNamespaceConflict = "NamespaceConflict"
-	ReasonImageInvalid      = "ImageInvalid"
-	ReasonInvalidSpec       = "InvalidSpec"
-	ReasonRolloutFailed     = "RolloutFailed"
-	ReasonReconciling       = "Reconciling"
-	ReasonExpiring          = "Expiring"
-	ReasonDeleting          = "Deleting"
-	ReasonPaused            = "Paused"
-	ReasonArgoSyncing       = "ArgoSyncing"
-	ReasonArgoHealthy       = "ArgoHealthy"
+	ReasonWorkloadReady       = "WorkloadReady"
+	ReasonNamespaceReady      = "NamespaceReady"
+	ReasonNamespaceConflict   = "NamespaceConflict"
+	ReasonImageInvalid        = "ImageInvalid"
+	ReasonInvalidSpec         = "InvalidSpec"
+	ReasonRolloutFailed       = "RolloutFailed"
+	ReasonReconciling         = "Reconciling"
+	ReasonExpiring            = "Expiring"
+	ReasonDeleting            = "Deleting"
+	ReasonPaused              = "Paused"
+	ReasonArgoSyncing         = "ArgoSyncing"
+	ReasonArgoHealthy         = "ArgoHealthy"
+	ReasonTemplateNotFound    = "TemplateNotFound"
+	ReasonRouteReady          = "RouteReady"
+	ReasonRoutePending        = "RoutePending"
+	ReasonNetworkReady        = "NetworkReady"
+	ReasonDependenciesReady   = "DependenciesReady"
+	ReasonDependenciesPending = "DependenciesPending"
+
+	LabelService    = "mirage.dev/service"
+	LabelDependency = "mirage.dev/dependency"
 )
+
+// PreviewDependenciesSpec configures ephemeral in-namespace dependencies
+// (Deployments/Services) for preview workloads. No Helm operators.
+type PreviewDependenciesSpec struct {
+	// +optional
+	Postgres *PostgresDependencySpec `json:"postgres,omitempty"`
+	// +optional
+	Redis *RedisDependencySpec `json:"redis,omitempty"`
+	// +optional
+	Kafka *KafkaDependencySpec `json:"kafka,omitempty"`
+}
+
+// PostgresDependencySpec enables an ephemeral Postgres for the preview namespace.
+type PostgresDependencySpec struct {
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+	// Version is the image tag major/minor (e.g. "16"). Defaults to "16".
+	// +optional
+	Version string `json:"version,omitempty"`
+	// Storage size (e.g. "1Gi"). Reserved for PVC; MVP uses emptyDir only.
+	// Non-empty values are rejected by admission until PVC support lands.
+	// +optional
+	Storage string `json:"storage,omitempty"`
+}
+
+// RedisDependencySpec enables an ephemeral Redis for the preview namespace.
+type RedisDependencySpec struct {
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+	// Version is the image tag (e.g. "7.2"). Defaults to "7.2".
+	// +optional
+	Version string `json:"version,omitempty"`
+}
+
+// KafkaDependencySpec enables an ephemeral Kafka (KRaft, single-node) for the preview namespace.
+type KafkaDependencySpec struct {
+	// +optional
+	Enabled bool `json:"enabled,omitempty"`
+	// Version is the image tag (e.g. "3.7"). Defaults to "3.7".
+	// +optional
+	Version string `json:"version,omitempty"`
+}
 
 // SourceSpec identifies the git/PR/MR origin of a preview.
 type SourceSpec struct {
@@ -168,14 +226,92 @@ const (
 	NetworkPolicyDisabled   NetworkPolicyMode = "disabled"
 )
 
-// PreviewEnvironmentSpec defines the desired state of PreviewEnvironment.
-type PreviewEnvironmentSpec struct {
-	// +optional
-	Source *SourceSpec `json:"source,omitempty"`
+// PreviewServiceSpec defines one workload inside a multi-service preview.
+type PreviewServiceSpec struct {
+	// Name is the service identity (DNS-1123 label). Used for Deployment/Service names.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	Name string `json:"name"`
 
 	// Image is the container image (digest strongly recommended).
 	// +kubebuilder:validation:MinLength=1
 	Image string `json:"image"`
+
+	// Port is the container port (defaults to template/preview containerPort or 8080).
+	// +optional
+	Port int32 `json:"port,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=10
+	Replicas *int32 `json:"replicas,omitempty"`
+
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
+
+	// +optional
+	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
+
+	// +optional
+	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// +optional
+	Command []string `json:"command,omitempty"`
+
+	// +optional
+	Args []string `json:"args,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
+	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
+
+	// +optional
+	ReadinessProbe *ProbeSpec `json:"readinessProbe,omitempty"`
+
+	// +optional
+	LivenessProbe *ProbeSpec `json:"livenessProbe,omitempty"`
+
+	// Ingress exposes this service. When omitted, top-level ingress applies only to the primary service.
+	// +optional
+	Ingress *IngressSpec `json:"ingress,omitempty"`
+}
+
+// ServiceStatus reports observed state for one preview service.
+type ServiceStatus struct {
+	// Name of the service.
+	// +kubebuilder:validation:MinLength=1
+	Name string `json:"name"`
+	// +optional
+	Ready bool `json:"ready,omitempty"`
+	// +optional
+	URL string `json:"url,omitempty"`
+	// +optional
+	Replicas string `json:"replicas,omitempty"`
+	// +optional
+	Message string `json:"message,omitempty"`
+}
+
+// PreviewEnvironmentSpec defines the desired state of PreviewEnvironment.
+type PreviewEnvironmentSpec struct {
+	// TemplateRef applies platform defaults from a PreviewTemplate.
+	// Explicit PreviewEnvironment fields override the template.
+	// +optional
+	TemplateRef *TemplateRef `json:"templateRef,omitempty"`
+
+	// +optional
+	Source *SourceSpec `json:"source,omitempty"`
+
+	// Image is the container image for single-service previews (digest strongly recommended).
+	// Required when services is empty; ignored for named entries in services.
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// Services defines multi-service preview workloads. When set, each entry gets its own
+	// Deployment/Service (and optional Ingress). When empty, Image drives a single workload.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Services []PreviewServiceSpec `json:"services,omitempty"`
 
 	// RequireDigest rejects tags without @sha256 when true (also enforced by webhook policy).
 	// +optional
@@ -190,7 +326,6 @@ type PreviewEnvironmentSpec struct {
 	TargetNamespace string `json:"targetNamespace"`
 
 	// +optional
-	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=10
 	Replicas *int32 `json:"replicas,omitempty"`
@@ -202,11 +337,9 @@ type PreviewEnvironmentSpec struct {
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// +optional
-	// +kubebuilder:default=8080
 	ContainerPort int32 `json:"containerPort,omitempty"`
 
 	// +optional
-	// +kubebuilder:default=direct
 	// +kubebuilder:validation:Enum=direct;argocd
 	Backend string `json:"backend,omitempty"`
 
@@ -273,8 +406,8 @@ type PreviewEnvironmentSpec struct {
 	// +kubebuilder:validation:Minimum=0
 	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 
+	// NetworkPolicy mode. When empty, uses PreviewTemplate or baseline.
 	// +optional
-	// +kubebuilder:default=baseline
 	NetworkPolicy NetworkPolicyMode `json:"networkPolicy,omitempty"`
 
 	// +optional
@@ -283,6 +416,15 @@ type PreviewEnvironmentSpec struct {
 	// PriorityClassName for preview pods.
 	// +optional
 	PriorityClassName string `json:"priorityClassName,omitempty"`
+
+	// RuntimeClassName for preview pods (overrides template security.runtimeClassName).
+	// +optional
+	RuntimeClassName string `json:"runtimeClassName,omitempty"`
+
+	// Dependencies provisions ephemeral postgres/redis/kafka in the target namespace
+	// and injects DATABASE_URL / REDIS_URL / KAFKA_BROKERS into preview app containers.
+	// +optional
+	Dependencies *PreviewDependenciesSpec `json:"dependencies,omitempty"`
 }
 
 // PreviewEnvironmentStatus defines the observed state of PreviewEnvironment.
@@ -301,6 +443,14 @@ type PreviewEnvironmentStatus struct {
 	ReplicaStatus string `json:"replicaStatus,omitempty"`
 	// +optional
 	ArgoApplication string `json:"argoApplication,omitempty"`
+	// TemplateRef records the resolved template name when templateRef was used.
+	// +optional
+	Template string `json:"template,omitempty"`
+	// Services reports per-service readiness for multi-service previews.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Services []ServiceStatus `json:"services,omitempty"`
 	// +optional
 	// +listType=map
 	// +listMapKey=type
@@ -316,6 +466,7 @@ type PreviewEnvironmentStatus struct {
 // +kubebuilder:printcolumn:name="Expires",type=string,JSONPath=`.status.expiresAt`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec.targetNamespace) || self.spec.targetNamespace == oldSelf.spec.targetNamespace",message="targetNamespace is immutable"
+// +kubebuilder:validation:XValidation:rule="(has(self.spec.image) && self.spec.image != \"\") || (has(self.spec.services) && size(self.spec.services) > 0)",message="spec.image or spec.services is required"
 
 // PreviewEnvironment is the Schema for the previewenvironments API.
 type PreviewEnvironment struct {
