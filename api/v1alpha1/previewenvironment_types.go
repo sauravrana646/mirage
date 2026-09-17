@@ -100,6 +100,7 @@ type PreviewEnvironmentSpec struct {
 	TTLSeconds *int64 `json:"ttlSeconds,omitempty"`
 
 	// TargetNamespace is where workloads are created (one namespace per preview).
+	// Immutable after create — changing it would orphan the previous namespace.
 	// +kubebuilder:validation:MinLength=1
 	TargetNamespace string `json:"targetNamespace"`
 
@@ -107,6 +108,7 @@ type PreviewEnvironmentSpec struct {
 	// +optional
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=5
 	Replicas *int32 `json:"replicas,omitempty"`
 
 	// Env is injected into the preview container.
@@ -164,6 +166,7 @@ type PreviewEnvironmentStatus struct {
 // +kubebuilder:printcolumn:name="URL",type=string,JSONPath=`.status.url`
 // +kubebuilder:printcolumn:name="Expires",type=string,JSONPath=`.status.expiresAt`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
+// +kubebuilder:validation:XValidation:rule="!has(oldSelf.spec.targetNamespace) || self.spec.targetNamespace == oldSelf.spec.targetNamespace",message="targetNamespace is immutable"
 
 // PreviewEnvironment is the Schema for the previewenvironments API.
 type PreviewEnvironment struct {

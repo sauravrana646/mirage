@@ -25,11 +25,15 @@
 
 | Phase | Baseline |
 |-------|----------|
-| 2 | Finalizer cleanup; ownership labels; NamespaceConflict handling; default ResourceQuota + LimitRange; restricted pod securityContext |
-| 3 | Ingress docs (nginx + nip.io); prefer unprivileged images |
-| 4 | Document + sample least-privilege Role for GitHub Action kube credentials |
-| 5 | Optional NetworkPolicy; Helm chart; PSA when leaving personal kind |
+| 2 | Finalizer cleanup; ownership labels; NamespaceConflict; immutable `targetNamespace`; default ResourceQuota + LimitRange; baseline NetworkPolicy (DNS egress + app ingress); PSA `restricted` labels; restricted pod securityContext; SA token not automounted |
+| 3 | Ingress docs (nginx + nip.io); prefer unprivileged images; ingress off by default in samples |
+| 4 | Least-privilege CI Role sample; document shared-SA risks + prefer OIDC |
+| 5 | Helm chart; optional Kyverno/OPA to constrain manager writes; image digest/registry allowlists |
 | 7 | Redaction policy for AI |
+
+## Manager RBAC (known trade-off)
+
+The manager ClusterRole can create Namespaces and Deployments/Services/Ingresses cluster-wide because preview namespaces are dynamic. On a shared cluster, pair Mirage with admission policy (Kyverno/OPA) that only allows Mirage writes into namespaces labeled `app.kubernetes.io/managed-by=mirage`. Do not treat the manager SA as a break-glass admin credential.
 
 ## Explicit non-goals early
 

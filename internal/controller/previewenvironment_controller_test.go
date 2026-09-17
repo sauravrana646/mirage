@@ -25,6 +25,7 @@ import (
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -118,6 +119,11 @@ var _ = Describe("PreviewEnvironment Controller", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "mirage-quota", Namespace: targetNS}, quota)).To(Succeed())
 			lr := &corev1.LimitRange{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "mirage-defaults", Namespace: targetNS}, lr)).To(Succeed())
+			np := &networkingv1.NetworkPolicy{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "mirage-baseline", Namespace: targetNS}, np)).To(Succeed())
+			Expect(ns.Labels["pod-security.kubernetes.io/enforce"]).To(Equal("restricted"))
+			Expect(deploy.Spec.Template.Spec.AutomountServiceAccountToken).NotTo(BeNil())
+			Expect(*deploy.Spec.Template.Spec.AutomountServiceAccountToken).To(BeFalse())
 
 			By("simulating Deployment available")
 			deploy.Status.Replicas = 1
@@ -136,27 +142,79 @@ var _ = Describe("PreviewEnvironment Controller", func() {
 			Expect(pe.Status.Conditions).NotTo(BeEmpty())
 		})
 
-		It("reports NamespaceConflict when target namespace is foreign", func() {
-			foreign := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: targetNS}}
-			// Namespace may already exist from first reconcile in parallel — create before reconcile path
-			// Recreate scenario: delete PE children first by using a unique NS that we pre-create
-			conflictNS := "preview-conflict-" + randomSuffix()
-			Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: conflictNS}})).To(Succeed())
-
-			pe := &miragev1alpha1.PreviewEnvironment{}
-			Expect(k8sClient.Get(ctx, typeNamespacedName, pe)).To(Succeed())
-			pe.Spec.TargetNamespace = conflictNS
-			Expect(k8sClient.Update(ctx, pe)).To(Succeed())
-
+		It("does not mark Ready until all desired replicas are available", func() {
 			_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 			Expect(err).NotTo(HaveOccurred())
 
+			deploy := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: targetNS}, deploy)).To(Succeed())
+			replicas := int32(2)
+			deploy.Spec.Replicas = &replicas
+			Expect(k8sClient.Update(ctx, deploy)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: targetNS}, deploy)).To(Succeed())
+			deploy.Status.Replicas = 2
+			deploy.Status.ReadyReplicas = 1
+			deploy.Status.UpdatedReplicas = 1
+			deploy.Status.AvailableReplicas = 1
+			deploy.Status.ObservedGeneration = deploy.Generation
+			Expect(k8sClient.Status().Update(ctx, deploy)).To(Succeed())
+
+			pe := &miragev1alpha1.PreviewEnvironment{}
 			Expect(k8sClient.Get(ctx, typeNamespacedName, pe)).To(Succeed())
+			pe.Spec.Replicas = &replicas
+			Expect(k8sClient.Update(ctx, pe)).To(Succeed())
+
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, typeNamespacedName, pe)).To(Succeed())
+			Expect(pe.Status.Phase).NotTo(Equal(miragev1alpha1.PhaseReady))
+		})
+
+		It("rejects targetNamespace mutation", func() {
+			pe := &miragev1alpha1.PreviewEnvironment{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, pe)).To(Succeed())
+			pe.Spec.TargetNamespace = "preview-mutated-" + randomSuffix()
+			err := k8sClient.Update(ctx, pe)
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("reports NamespaceConflict when target namespace is foreign", func() {
+			conflictNS := "preview-conflict-" + randomSuffix()
+			Expect(k8sClient.Create(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: conflictNS}})).To(Succeed())
+
+			name := types.NamespacedName{Name: "conflict-preview", Namespace: "default"}
+			pe := &miragev1alpha1.PreviewEnvironment{
+				ObjectMeta: metav1.ObjectMeta{Name: name.Name, Namespace: name.Namespace},
+				Spec: miragev1alpha1.PreviewEnvironmentSpec{
+					Image:           "nginxinc/nginx-unprivileged:1.27-alpine",
+					TargetNamespace: conflictNS,
+					ContainerPort:   8080,
+					Replicas:        int32Ptr(0),
+				},
+			}
+			Expect(k8sClient.Create(ctx, pe)).To(Succeed())
+
+			rec := &PreviewEnvironmentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, _ = rec.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			_, err := rec.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, name, pe)).To(Succeed())
 			Expect(pe.Status.Phase).To(Equal(miragev1alpha1.PhaseFailed))
 			Expect(pe.Status.Conditions[0].Reason).To(Equal(miragev1alpha1.ReasonNamespaceConflict))
 
-			_ = foreign // silence if unused in some paths
+			Expect(k8sClient.Delete(ctx, pe)).To(Succeed())
+			Eventually(func(g Gomega) {
+				_, err := rec.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				g.Expect(err).NotTo(HaveOccurred())
+				err = k8sClient.Get(ctx, name, &miragev1alpha1.PreviewEnvironment{})
+				g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+
+			// Foreign namespace must still exist (controller must not delete it)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: conflictNS}, &corev1.Namespace{})).To(Succeed())
 			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: conflictNS}})
 		})
 	})

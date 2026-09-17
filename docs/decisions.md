@@ -6,6 +6,19 @@ Format inspired by ADRs — keep each entry short.
 Template:
 
 ```markdown
+## YYYY-MM-DD — Title
+
+**Status:** Accepted | Proposed | Superseded by YYYY-MM-DD
+
+**Context:** Why we needed a choice.
+
+**Decision:** What we chose.
+
+**Consequences:** Trade-offs, follow-ups.
+```
+
+---
+
 ## 2026-09-17 — API group served as mirage.dev
 
 **Status:** Accepted
@@ -30,16 +43,27 @@ Template:
 
 ---
 
-## YYYY-MM-DD — Title
+## 2026-09-17 — Immutable targetNamespace
 
-**Status:** Accepted | Proposed | Superseded by YYYY-MM-DD
+**Status:** Accepted
 
-**Context:** Why we needed a choice.
+**Context:** Changing `spec.targetNamespace` after create provisioned a new env but left the old namespace running (orphan leak).
 
-**Decision:** What we chose.
+**Decision:** Mark `targetNamespace` **immutable** via CRD CEL (`XValidation`).
 
-**Consequences:** Trade-offs, follow-ups.
-```
+**Consequences:** Callers must delete/recreate the CR to move namespaces; cleanup always matches the single owned namespace.
+
+---
+
+## 2026-09-17 — Preview isolation defaults
+
+**Status:** Accepted
+
+**Context:** Security review: untrusted PR images need PSA, network, and identity baselines before shared-cluster demos.
+
+**Decision:** Preview namespaces get PSA `restricted` labels, ResourceQuota/LimitRange, baseline NetworkPolicy (DNS egress + app-port ingress), restricted container securityContext, and `automountServiceAccountToken: false`. Cap `replicas` at 5.
+
+**Consequences:** Images must run as non-root (sample uses nginx-unprivileged). Apps needing broader egress need a future escape hatch.
 
 ---
 

@@ -205,6 +205,7 @@ spec:
                 default: 1
                 description: Replicas for the preview Deployment.
                 format: int32
+                maximum: 5
                 minimum: 0
                 type: integer
               resources:
@@ -280,8 +281,9 @@ spec:
                     type: string
                 type: object
               targetNamespace:
-                description: TargetNamespace is where workloads are created (one namespace
-                  per preview).
+                description: |-
+                  TargetNamespace is where workloads are created (one namespace per preview).
+                  Immutable after create — changing it would orphan the previous namespace.
                 minLength: 1
                 type: string
               ttlSeconds:
@@ -375,6 +377,10 @@ spec:
                 type: string
             type: object
         type: object
+        x-kubernetes-validations:
+        - message: targetNamespace is immutable
+          rule: '!has(oldSelf.spec.targetNamespace) || self.spec.targetNamespace ==
+            oldSelf.spec.targetNamespace'
     served: true
     storage: true
     subresources:

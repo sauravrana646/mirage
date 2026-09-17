@@ -35,7 +35,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	miragev1alpha1 "github.com/sauravrana646/mirage/api/v1alpha1"
 )
@@ -68,6 +70,7 @@ type PreviewEnvironmentReconciler struct {
 // +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=limitranges,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile moves cluster state toward the PreviewEnvironment spec.
@@ -188,6 +191,9 @@ func (r *PreviewEnvironmentReconciler) ensureChildren(ctx context.Context, pe *m
 	if err := r.ensureResourceQuota(ctx, pe); err != nil {
 		return err
 	}
+	if err := r.ensureNetworkPolicy(ctx, pe); err != nil {
+		return err
+	}
 	if _, err := r.ensureDeployment(ctx, pe); err != nil {
 		return err
 	}
@@ -303,6 +309,10 @@ func (r *PreviewEnvironmentReconciler) ensureNamespace(ctx context.Context, pe *
 					miragev1alpha1.LabelOwnerUID:       string(pe.UID),
 					miragev1alpha1.LabelOwnerName:      pe.Name,
 					miragev1alpha1.LabelOwnerNamespace: pe.Namespace,
+					// Enforce restricted Pod Security Standards on preview workloads.
+					"pod-security.kubernetes.io/enforce": "restricted",
+					"pod-security.kubernetes.io/warn":    "restricted",
+					"pod-security.kubernetes.io/audit":   "restricted",
 				},
 			},
 		}
@@ -378,6 +388,50 @@ func (r *PreviewEnvironmentReconciler) ensureResourceQuota(ctx context.Context, 
 	return err
 }
 
+// ensureNetworkPolicy allows DNS egress and ingress on the preview Service port;
+// all other egress is denied (baseline isolation for untrusted PR workloads).
+func (r *PreviewEnvironmentReconciler) ensureNetworkPolicy(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
+	port := pe.Spec.ContainerPort
+	if port == 0 {
+		port = defaultContainerPort
+	}
+	np := &networkingv1.NetworkPolicy{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mirage-baseline",
+			Namespace: pe.Spec.TargetNamespace,
+		},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
+		np.Labels = r.workloadLabels(pe)
+		np.Spec.PodSelector = metav1.LabelSelector{MatchLabels: map[string]string{appLabel: pe.Name}}
+		np.Spec.PolicyTypes = []networkingv1.PolicyType{
+			networkingv1.PolicyTypeIngress,
+			networkingv1.PolicyTypeEgress,
+		}
+		np.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{{
+			Ports: []networkingv1.NetworkPolicyPort{{
+				Protocol: protocolPtr(corev1.ProtocolTCP),
+				Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: port},
+			}},
+		}}
+		dnsUDP := networkingv1.NetworkPolicyPort{
+			Protocol: protocolPtr(corev1.ProtocolUDP),
+			Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 53},
+		}
+		dnsTCP := networkingv1.NetworkPolicyPort{
+			Protocol: protocolPtr(corev1.ProtocolTCP),
+			Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 53},
+		}
+		np.Spec.Egress = []networkingv1.NetworkPolicyEgressRule{{
+			Ports: []networkingv1.NetworkPolicyPort{dnsUDP, dnsTCP},
+		}}
+		return nil
+	})
+	return err
+}
+
+func protocolPtr(p corev1.Protocol) *corev1.Protocol { return &p }
+
 func (r *PreviewEnvironmentReconciler) ensureDeployment(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) (*appsv1.Deployment, error) {
 	replicas := defaultReplicas
 	if pe.Spec.Replicas != nil {
@@ -423,6 +477,8 @@ func (r *PreviewEnvironmentReconciler) ensureDeployment(ctx context.Context, pe 
 				},
 			},
 		}}
+		automount := false
+		deploy.Spec.Template.Spec.AutomountServiceAccountToken = &automount
 		deploy.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
 			RunAsNonRoot: boolPtr(true),
 			SeccompProfile: &corev1.SeccompProfile{
@@ -506,12 +562,16 @@ func (r *PreviewEnvironmentReconciler) ensureIngress(ctx context.Context, pe *mi
 }
 
 func deploymentReady(d *appsv1.Deployment) bool {
-	if d.Spec.Replicas != nil && *d.Spec.Replicas == 0 {
+	desired := int32(1)
+	if d.Spec.Replicas != nil {
+		desired = *d.Spec.Replicas
+	}
+	if desired == 0 {
 		return true
 	}
-	return d.Status.ReadyReplicas > 0 &&
-		d.Status.UpdatedReplicas == d.Status.ReadyReplicas &&
-		d.Status.AvailableReplicas == d.Status.ReadyReplicas &&
+	return d.Status.ReadyReplicas >= desired &&
+		d.Status.UpdatedReplicas >= desired &&
+		d.Status.AvailableReplicas >= desired &&
 		d.Status.ObservedGeneration >= d.Generation
 }
 
@@ -558,8 +618,22 @@ func (r *PreviewEnvironmentReconciler) patchStatus(
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *PreviewEnvironmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	mapOwnedDeploy := handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
+		labels := obj.GetLabels()
+		if labels[miragev1alpha1.LabelManagedBy] != miragev1alpha1.ManagedByValue {
+			return nil
+		}
+		name := labels[miragev1alpha1.LabelOwnerName]
+		ns := labels[miragev1alpha1.LabelOwnerNamespace]
+		if name == "" || ns == "" {
+			return nil
+		}
+		return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}}}
+	})
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&miragev1alpha1.PreviewEnvironment{}).
+		Watches(&appsv1.Deployment{}, mapOwnedDeploy).
 		Named("previewenvironment").
 		Complete(r)
 }

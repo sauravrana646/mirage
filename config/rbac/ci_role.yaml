@@ -1,5 +1,12 @@
 # Least-privilege Role for CI (GitHub Actions) that applies PreviewEnvironment CRs.
 # Bind to a ServiceAccount used via kubeconfig / OIDC in CI — never cluster-admin.
+#
+# Trust notes (shared-cluster):
+# - This Role can mutate ALL PreviewEnvironment objects in mirage-system.
+# - Prefer short-lived OIDC tokens over a long-lived kubeconfig secret.
+# - Rotate credentials if leaked; do not grant this SA any apps/deployments verbs.
+# - For stricter isolation, add admission policy binding CR name (e.g. pr-N)
+#   to the authenticated workflow identity (future hardening).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
