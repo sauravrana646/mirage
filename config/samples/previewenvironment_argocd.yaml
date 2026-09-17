@@ -1,0 +1,26 @@
+# Argo CD backend: Mirage owns lifecycle; Argo syncs the Git path into targetNamespace.
+apiVersion: mirage.dev/v1alpha1
+kind: PreviewEnvironment
+metadata:
+  name: pr-42-argocd
+  namespace: mirage-system
+spec:
+  image: ghcr.io/example/app/preview@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  targetNamespace: preview-pr-42
+  ttlSeconds: 86400
+  backend: argocd
+  source:
+    repo: https://github.com/example/app
+    pullRequest: 42
+    commitSHA: 0123456789abcdef0123456789abcdef01234567
+  argoCD:
+    repoURL: https://github.com/example/app
+    path: deploy/preview
+    targetRevision: 0123456789abcdef0123456789abcdef01234567
+    project: default
+    argoNamespace: argocd
+    destinationNamespace: preview-pr-42
+  ingress:
+    enabled: true
+    host: pr-42.preview.example.com
+    ingressClassName: nginx

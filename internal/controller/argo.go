@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -73,13 +74,11 @@ func (r *PreviewEnvironmentReconciler) reconcileArgo(ctx context.Context, pe *mi
 		msg = "Argo CD Application healthy and synced"
 		r.record(pe, corev1.EventTypeNormal, reason, msg)
 		if expiresAt != nil {
-			requeue = ctrl.Result{RequeueAfter: expiresAt.Sub(expiresAt.Time) + expiresAt.Time.Sub(expiresAt.Time)}
-			requeue = ctrl.Result{RequeueAfter: requeueFast}
-			if d := expiresAt.Sub(metav1.Now().Time); d > 0 {
-				requeue = ctrl.Result{RequeueAfter: d}
+			d := time.Until(expiresAt.Time)
+			if d < time.Second {
+				d = time.Second
 			}
-		} else {
-			requeue = ctrl.Result{RequeueAfter: requeueFast}
+			requeue = ctrl.Result{RequeueAfter: d}
 		}
 	} else if health == "Degraded" {
 		phase = miragev1alpha1.PhaseFailed
@@ -98,7 +97,7 @@ func (r *PreviewEnvironmentReconciler) ensureArgoApplication(ctx context.Context
 	spec := pe.Spec.ArgoCD
 	argoNS := spec.ArgoNamespace
 	if argoNS == "" {
-		argoNS = "argocd"
+		argoNS = miragev1alpha1.DefaultArgoNamespace
 	}
 	destNS := spec.DestinationNamespace
 	if destNS == "" {
@@ -150,7 +149,7 @@ func (r *PreviewEnvironmentReconciler) ensureArgoApplication(ctx context.Context
 }
 
 func (r *PreviewEnvironmentReconciler) deleteArgoApplication(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
-	argoNS := "argocd"
+	argoNS := miragev1alpha1.DefaultArgoNamespace
 	if pe.Spec.ArgoCD != nil && pe.Spec.ArgoCD.ArgoNamespace != "" {
 		argoNS = pe.Spec.ArgoCD.ArgoNamespace
 	}

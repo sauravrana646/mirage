@@ -79,6 +79,17 @@ spec:
               port: 8081
             initialDelaySeconds: 5
             periodSeconds: 10
+          env:
+            - name: MIRAGE_REQUIRE_DIGEST
+              value: {{ .Values.policy.requireDigest | quote }}
+            - name: MIRAGE_ALLOWED_REGISTRIES
+              value: {{ .Values.policy.allowedRegistries | quote }}
+            - name: MIRAGE_INGRESS_HOST_SUFFIX
+              value: {{ .Values.policy.ingressHostSuffix | quote }}
+            - name: MIRAGE_DEFAULT_TTL_SECONDS
+              value: {{ .Values.policy.defaultTTLSeconds | quote }}
+            - name: MIRAGE_MAX_TTL_SECONDS
+              value: {{ .Values.policy.maxTTLSeconds | quote }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
@@ -105,4 +116,15 @@ spec:
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- range .Values.topologySpreadConstraints }}
+        - maxSkew: {{ .maxSkew }}
+          topologyKey: {{ .topologyKey }}
+          whenUnsatisfiable: {{ .whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "mirage.selectorLabels" $ | nindent 14 }}
+        {{- end }}
       {{- end }}

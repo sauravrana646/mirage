@@ -53,7 +53,7 @@ func (r *PreviewEnvironmentReconciler) ensureChildren(ctx context.Context, pe *m
 	if pe.Spec.Ingress != nil && pe.Spec.Ingress.Enabled {
 		return r.ensureIngress(ctx, pe)
 	}
-	return nil
+	return r.deleteIngressIfPresent(ctx, pe)
 }
 
 func (r *PreviewEnvironmentReconciler) cleanupTarget(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
@@ -216,7 +216,8 @@ func intstrPtr(port int32) *intstr.IntOrString {
 	v := intstr.FromInt32(port)
 	return &v
 }
-func boolPtr(v bool) *bool { return &v }
+func boolPtr(v bool) *bool    { return &v }
+func int32Ptr(v int32) *int32 { return &v }
 
 func (r *PreviewEnvironmentReconciler) ensureDeployment(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) (*appsv1.Deployment, error) {
 	replicas := defaultReplicas
@@ -241,7 +242,8 @@ func (r *PreviewEnvironmentReconciler) ensureDeployment(ctx context.Context, pe 
 		}
 		automount := false
 		container := corev1.Container{
-			Name: "app", Image: pe.Spec.Image, Env: pe.Spec.Env, Resources: pe.Spec.Resources,
+			Name: "app", Image: pe.Spec.Image, Env: pe.Spec.Env, EnvFrom: pe.Spec.EnvFrom,
+			Command: pe.Spec.Command, Args: pe.Spec.Args, Resources: pe.Spec.Resources,
 			Ports: []corev1.ContainerPort{{Name: "http", ContainerPort: port}},
 			SecurityContext: &corev1.SecurityContext{
 				AllowPrivilegeEscalation: boolPtr(false),
@@ -249,6 +251,9 @@ func (r *PreviewEnvironmentReconciler) ensureDeployment(ctx context.Context, pe 
 				Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 				SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
+		}
+		if pe.Spec.ImagePullPolicy != "" {
+			container.ImagePullPolicy = pe.Spec.ImagePullPolicy
 		}
 		if pe.Spec.ReadinessProbe != nil {
 			container.ReadinessProbe = httpProbe(pe.Spec.ReadinessProbe, port)
@@ -260,6 +265,14 @@ func (r *PreviewEnvironmentReconciler) ensureDeployment(ctx context.Context, pe 
 		deploy.Spec.Template.Spec.Containers = []corev1.Container{container}
 		deploy.Spec.Template.Spec.ImagePullSecrets = pe.Spec.ImagePullSecrets
 		deploy.Spec.Template.Spec.PriorityClassName = pe.Spec.PriorityClassName
+		deploy.Spec.Template.Spec.ServiceAccountName = pe.Spec.ServiceAccountName
+		deploy.Spec.Template.Spec.NodeSelector = pe.Spec.NodeSelector
+		deploy.Spec.Template.Spec.Tolerations = pe.Spec.Tolerations
+		deploy.Spec.Template.Spec.Affinity = pe.Spec.Affinity
+		if pe.Spec.TerminationGracePeriodSeconds != nil {
+			deploy.Spec.Template.Spec.TerminationGracePeriodSeconds = pe.Spec.TerminationGracePeriodSeconds
+		}
+		deploy.Spec.RevisionHistoryLimit = int32Ptr(3)
 		deploy.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
 			RunAsNonRoot:   boolPtr(true),
 			SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
@@ -357,6 +370,14 @@ func (r *PreviewEnvironmentReconciler) ensureIngress(ctx context.Context, pe *mi
 		return nil
 	})
 	return err
+}
+
+func (r *PreviewEnvironmentReconciler) deleteIngressIfPresent(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
+	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: pe.Name, Namespace: pe.Spec.TargetNamespace}}
+	if err := r.Delete(ctx, ing); err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 func (r *PreviewEnvironmentReconciler) imagePullMessage(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) string {

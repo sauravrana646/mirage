@@ -19,10 +19,14 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -125,7 +129,7 @@ func validateSpec(pe *miragev1alpha1.PreviewEnvironment) (message, reason string
 	if errs := validation.IsDNS1123Label(pe.Spec.TargetNamespace); len(errs) > 0 {
 		return fmt.Sprintf("invalid targetNamespace: %v", errs), miragev1alpha1.ReasonInvalidSpec
 	}
-	if pe.Spec.Backend != "" && pe.Spec.Backend != "direct" && pe.Spec.Backend != "argocd" {
+	if pe.Spec.Backend != "" && pe.Spec.Backend != miragev1alpha1.BackendDirect && pe.Spec.Backend != miragev1alpha1.BackendArgoCD {
 		return fmt.Sprintf("backend %q is not supported", pe.Spec.Backend), miragev1alpha1.ReasonInvalidSpec
 	}
 	return "", ""
@@ -133,11 +137,20 @@ func validateSpec(pe *miragev1alpha1.PreviewEnvironment) (message, reason string
 
 func computeExpiresAt(pe *miragev1alpha1.PreviewEnvironment, now time.Time) *metav1.Time {
 	expiresAt := pe.Status.ExpiresAt.DeepCopy()
-	if pe.Spec.TTLSeconds != nil && *pe.Spec.TTLSeconds > 0 && expiresAt == nil {
-		t := metav1.NewTime(now.Add(time.Duration(*pe.Spec.TTLSeconds) * time.Second))
+	ttl := effectiveTTLSeconds(pe)
+	if ttl > 0 && expiresAt == nil {
+		t := metav1.NewTime(now.Add(time.Duration(ttl) * time.Second))
 		expiresAt = &t
 	}
 	return expiresAt
+}
+
+// effectiveTTLSeconds returns spec.ttlSeconds, or MIRAGE_DEFAULT_TTL_SECONDS when unset.
+func effectiveTTLSeconds(pe *miragev1alpha1.PreviewEnvironment) int64 {
+	if pe.Spec.TTLSeconds != nil {
+		return *pe.Spec.TTLSeconds
+	}
+	return defaultTTLFromEnv()
 }
 
 func (r *PreviewEnvironmentReconciler) handleExpiry(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment, expiresAt *metav1.Time) (bool, error) {
@@ -176,10 +189,10 @@ func (r *PreviewEnvironmentReconciler) reconcileActive(ctx context.Context, pe *
 
 	backend := pe.Spec.Backend
 	if backend == "" {
-		backend = "direct"
+		backend = miragev1alpha1.BackendDirect
 	}
 
-	if backend == "argocd" {
+	if backend == miragev1alpha1.BackendArgoCD {
 		return r.reconcileArgo(ctx, pe, expiresAt)
 	}
 	return r.reconcileDirect(ctx, pe, expiresAt)
@@ -225,7 +238,7 @@ func (r *PreviewEnvironmentReconciler) reconcileDirect(ctx context.Context, pe *
 func (r *PreviewEnvironmentReconciler) reconcileDelete(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) (ctrl.Result, error) {
 	log.FromContext(ctx).Info("Deleting PreviewEnvironment children")
 	r.record(pe, corev1.EventTypeNormal, miragev1alpha1.ReasonDeleting, "Cleaning up preview resources")
-	if pe.Spec.Backend == "argocd" {
+	if pe.Spec.Backend == miragev1alpha1.BackendArgoCD {
 		if err := r.deleteArgoApplication(ctx, pe); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -350,6 +363,26 @@ func (r *PreviewEnvironmentReconciler) patchStatus(ctx context.Context, pe *mira
 		Message:            p.Message,
 		ObservedGeneration: latest.Generation,
 	})
+	progressing := metav1.ConditionFalse
+	if p.Phase == miragev1alpha1.PhasePending || p.Phase == miragev1alpha1.PhaseExpiring {
+		progressing = metav1.ConditionTrue
+	}
+	meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+		Type:               miragev1alpha1.ConditionProgressing,
+		Status:             progressing,
+		Reason:             p.Reason,
+		Message:            p.Message,
+		ObservedGeneration: latest.Generation,
+	})
+	if p.Phase == miragev1alpha1.PhaseExpiring {
+		meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
+			Type:               miragev1alpha1.ConditionExpired,
+			Status:             metav1.ConditionTrue,
+			Reason:             miragev1alpha1.ReasonExpiring,
+			Message:            p.Message,
+			ObservedGeneration: latest.Generation,
+		})
+	}
 	latest.Status.Phase = p.Phase
 	latest.Status.URL = p.URL
 	latest.Status.Message = p.Message
@@ -387,6 +420,20 @@ func (r *PreviewEnvironmentReconciler) SetupWithManager(mgr ctrl.Manager) error 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&miragev1alpha1.PreviewEnvironment{}).
 		Watches(&appsv1.Deployment{}, mapOwned).
+		Watches(&corev1.Service{}, mapOwned).
+		Watches(&networkingv1.Ingress{}, mapOwned).
 		Named("previewenvironment").
 		Complete(r)
+}
+
+func defaultTTLFromEnv() int64 {
+	raw := strings.TrimSpace(os.Getenv("MIRAGE_DEFAULT_TTL_SECONDS"))
+	if raw == "" {
+		return 0
+	}
+	v, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || v < 0 {
+		return 0
+	}
+	return v
 }

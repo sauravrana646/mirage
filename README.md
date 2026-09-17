@@ -1,75 +1,78 @@
 # Mirage
 
-**Ephemeral PR preview environments for Kubernetes.**
+**Ephemeral PR preview environments for Kubernetes — production-ready operator.**
 
-Mirage is a Kubernetes operator that spins up short-lived preview environments for pull requests and tears them down when the PR closes or a TTL expires — like a mirage: visible while you need it, gone when you don’t.
+Mirage creates short-lived preview environments for pull requests and tears them down when the PR closes or a TTL expires.
 
-> Status: **MVP implemented** (Phases 1–3). See [`docs/`](./docs/).
+## Features
 
-## Quick start (kind)
+| Area | Capability |
+|------|------------|
+| Core | Namespaced `PreviewEnvironment` CRD, finalizer cleanup, immutable `targetNamespace` |
+| Workloads | Deployment + Service, probes, imagePullSecrets, workload labels/annotations |
+| Isolation | PSA `restricted`, ResourceQuota/LimitRange, NetworkPolicy (`baseline`/`permissive`/`disabled`) |
+| Lifecycle | TTL expiry, suspend/resume, Kubernetes Events, Prometheus metrics |
+| Access | Optional Ingress (path, annotations, TLS), nginx+nip.io docs |
+| Scheduling | nodeSelector, tolerations, affinity, priorityClass, grace period |
+| GitOps | `backend: argocd` creates Argo CD Applications |
+| CI | GitHub Action: build→digest→upsert CR→PR comment; least-privilege CI Role; release to GHCR |
+| Admission | Validating webhook (digest, registry allowlist, ingress host suffix, Argo fields, max TTL) |
+| AI | Side-path failure summaries (`ai/`) — never in reconcile |
+| Package | Helm chart (`charts/mirage`), HA replicas, PDB, topology spread, ServiceMonitor, webhook TLS |
+
+## Install (Helm)
 
 ```bash
-# Prerequisites: Go 1.23+, Docker, kubectl, kind, make
+# CRDs (also shipped under charts/mirage/crds/)
+kubectl apply -f config/crd/bases/
 
-kind create cluster --name mirage
+helm upgrade --install mirage charts/mirage \
+  --namespace mirage-system --create-namespace \
+  --set image.repository=ghcr.io/sauravrana646/mirage \
+  --set image.tag=0.1.0 \
+  --set replicaCount=2 \
+  --set webhook.enabled=true
+```
 
-# Install CRDs and run the manager locally against the cluster
+See [`charts/mirage/README.md`](./charts/mirage/README.md).
+
+## Local dev loop
+
+```bash
+kind create cluster --name mirage   # or k3s
 make install
 make run
 
-# In another terminal — create a sample preview
 kubectl apply -f config/samples/mirage_v1alpha1_previewenvironment.yaml
 kubectl get previewenvironments
-kubectl get all -n preview-sample
-
-# Cleanup
-kubectl delete -f config/samples/mirage_v1alpha1_previewenvironment.yaml
+# short names: kubectl get pe
 ```
-
-### Dev loop
 
 | Command | Purpose |
 |---------|---------|
-| `make generate manifests` | Codegen + CRD/RBAC |
-| `make test` | envtest unit tests |
-| `make install` | Install CRDs into current kube-context |
-| `make run` | Run controller locally |
-| `make docker-build IMG=mirage:dev` | Build manager image |
-| `make deploy IMG=mirage:dev` | Deploy into cluster |
-
-CI least-privilege RBAC sample: [`config/rbac/ci_role.yaml`](./config/rbac/ci_role.yaml)  
-Example GitHub Action sketch: [`config/samples/github-actions-preview.yaml`](./config/samples/github-actions-preview.yaml)
-
-## Why
-
-Teams want per-PR previews without hand-maintained ApplicationSets, leftover namespaces, or tribal cleanup scripts. Mirage makes that a declared Kubernetes resource with a clear lifecycle.
+| `make generate manifests` | Codegen + CRD/RBAC/webhook |
+| `make test` | envtest + webhook unit tests |
+| `make lint` | golangci-lint |
+| `make docker-build IMG=...` | Manager image |
+| `make deploy IMG=...` | Kustomize deploy |
 
 ## Docs
 
 | Doc | Purpose |
 |-----|---------|
-| [PRD](./docs/prd.md) | Problem, goals, users, requirements |
-| [Plan](./docs/plan.md) | Phase-wise build plan |
-| [Architecture](./docs/architecture.md) | System design and components |
-| [CRD design](./docs/crd.md) | API for `PreviewEnvironment` |
-| [Security](./docs/security.md) | Threats, trust boundaries, baselines |
-| [Decisions](./docs/decisions.md) | Design decision log (append-only) |
-| [AI roadmap](./docs/ai-roadmap.md) | How AI plugs in later (not in reconcile) |
-| [Prior art](./docs/prior-art.md) | Related tools and how Mirage differs |
-| [kind Ingress](./docs/kind-ingress.md) | nginx + nip.io demo setup |
+| [PRD](./docs/prd.md) | Product requirements |
+| [Plan](./docs/plan.md) | Build plan |
+| [Architecture](./docs/architecture.md) | System design |
+| [CRD](./docs/crd.md) | API reference |
+| [Security](./docs/security.md) | Threat model & baselines |
+| [Decisions](./docs/decisions.md) | ADR log |
+| [kind Ingress](./docs/kind-ingress.md) | nginx + nip.io |
+| [Prior art](./docs/prior-art.md) | Alternatives |
+| [AI path](./ai/README.md) | Advisory side path |
 
-## Stack
+## Production sample
 
-- **Go** + **Kubebuilder** / `controller-runtime`
-- **kind** for local clusters
-- **GitHub** Actions for image build + CR apply (phase 4)
-- **nginx ingress** + nip.io for preview URLs on kind (phase 3)
-- **Argo CD** optional backend (phase 6)
-- **AI** as a side path (phase 7+) — never in the hot reconcile loop
-
-## Locked design defaults
-
-See [`docs/decisions.md`](./docs/decisions.md). Short version: namespaced `PreviewEnvironment` (`mirage.dev/v1alpha1`), finalizer-managed `targetNamespace`, `ttlSeconds` only (expiry deletes the CR).
+See [`config/samples/previewenvironment_production.yaml`](./config/samples/previewenvironment_production.yaml).
 
 ## License
 

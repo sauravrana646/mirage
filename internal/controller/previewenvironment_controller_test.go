@@ -274,9 +274,98 @@ var _ = Describe("PreviewEnvironment Controller", func() {
 			}, timeout, interval).Should(Succeed())
 		})
 	})
-})
 
-func int32Ptr(v int32) *int32 { return &v }
+	Context("suspend", func() {
+		It("sets Paused phase without deleting children", func() {
+			name := types.NamespacedName{Name: "suspend-preview", Namespace: "default"}
+			targetNS := "preview-suspend-" + randomSuffix()
+			pe := &miragev1alpha1.PreviewEnvironment{
+				ObjectMeta: metav1.ObjectMeta{Name: name.Name, Namespace: name.Namespace},
+				Spec: miragev1alpha1.PreviewEnvironmentSpec{
+					Image:           "nginxinc/nginx-unprivileged:1.27-alpine",
+					TargetNamespace: targetNS,
+					ContainerPort:   8080,
+					Replicas:        int32Ptr(0),
+				},
+			}
+			Expect(k8sClient.Create(ctx, pe)).To(Succeed())
+			rec := &PreviewEnvironmentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, _ = rec.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			_, err := rec.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(k8sClient.Get(ctx, name, pe)).To(Succeed())
+			pe.Spec.Suspend = true
+			Expect(k8sClient.Update(ctx, pe)).To(Succeed())
+			_, err = rec.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(k8sClient.Get(ctx, name, pe)).To(Succeed())
+			Expect(pe.Status.Phase).To(Equal(miragev1alpha1.PhasePaused))
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: targetNS}, &corev1.Namespace{})).To(Succeed())
+
+			Expect(k8sClient.Delete(ctx, pe)).To(Succeed())
+			Eventually(func(g Gomega) {
+				forceRemoveNamespace(ctx, targetNS)
+				_, err := rec.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				g.Expect(err).NotTo(HaveOccurred())
+				err = k8sClient.Get(ctx, name, &miragev1alpha1.PreviewEnvironment{})
+				g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	Context("ingress and probes", func() {
+		It("creates Ingress with TLS and applies probes", func() {
+			name := types.NamespacedName{Name: "ingress-preview", Namespace: "default"}
+			targetNS := "preview-ing-" + randomSuffix()
+			class := "nginx"
+			pe := &miragev1alpha1.PreviewEnvironment{
+				ObjectMeta: metav1.ObjectMeta{Name: name.Name, Namespace: name.Namespace},
+				Spec: miragev1alpha1.PreviewEnvironmentSpec{
+					Image:           "nginxinc/nginx-unprivileged:1.27-alpine",
+					TargetNamespace: targetNS,
+					ContainerPort:   8080,
+					Replicas:        int32Ptr(0),
+					ReadinessProbe:  &miragev1alpha1.ProbeSpec{Path: "/ready", Port: 8080},
+					Command:         []string{"/bin/app"},
+					Args:            []string{"--preview"},
+					Ingress: &miragev1alpha1.IngressSpec{
+						Enabled: true, Host: "pr.example.com", IngressClassName: &class,
+						TLS: &miragev1alpha1.TLSSpec{Enabled: true, SecretName: "pr-tls"},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, pe)).To(Succeed())
+			rec := &PreviewEnvironmentReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+			_, _ = rec.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			_, err := rec.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+			Expect(err).NotTo(HaveOccurred())
+
+			deploy := &appsv1.Deployment{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name.Name, Namespace: targetNS}, deploy)).To(Succeed())
+			Expect(deploy.Spec.Template.Spec.Containers[0].ReadinessProbe).NotTo(BeNil())
+			Expect(deploy.Spec.Template.Spec.Containers[0].Command).To(Equal([]string{"/bin/app"}))
+
+			ing := &networkingv1.Ingress{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: name.Name, Namespace: targetNS}, ing)).To(Succeed())
+			Expect(ing.Spec.TLS).NotTo(BeEmpty())
+			Expect(ing.Spec.TLS[0].SecretName).To(Equal("pr-tls"))
+
+			Expect(k8sClient.Get(ctx, name, pe)).To(Succeed())
+			Expect(pe.Status.URL).To(Equal("https://pr.example.com"))
+
+			Expect(k8sClient.Delete(ctx, pe)).To(Succeed())
+			Eventually(func(g Gomega) {
+				forceRemoveNamespace(ctx, targetNS)
+				_, err := rec.Reconcile(ctx, reconcile.Request{NamespacedName: name})
+				g.Expect(err).NotTo(HaveOccurred())
+				err = k8sClient.Get(ctx, name, &miragev1alpha1.PreviewEnvironment{})
+				g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+})
 
 func randomSuffix() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())

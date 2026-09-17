@@ -108,3 +108,27 @@ argoCD:
 priorityClassName: ""
 
 terminationGracePeriodSeconds: 10
+
+# Operator policy env (webhook + controller)
+policy:
+  requireDigest: false
+  allowedRegistries: ""
+  ingressHostSuffix: ""
+  # Applied when spec.ttlSeconds is omitted (0 = disabled).
+  defaultTTLSeconds: 0
+  # Reject CRs with ttlSeconds above this (0 = unlimited).
+  maxTTLSeconds: 0
+
+# Keep at least one manager available during voluntary disruptions (HA).
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  # maxUnavailable: 1  # mutually exclusive with minAvailable
+
+# Prefer spreading manager pods across nodes when replicaCount > 1.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels: {}

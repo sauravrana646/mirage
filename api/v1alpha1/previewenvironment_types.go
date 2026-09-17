@@ -32,6 +32,13 @@ const (
 	AnnotationAISummary = "mirage.dev/ai-summary"
 	AnnotationAIRisk    = "mirage.dev/ai-risk"
 
+	// BackendDirect applies Deployment/Service/Ingress directly.
+	BackendDirect = "direct"
+	// BackendArgoCD creates an Argo CD Application instead of direct apply.
+	BackendArgoCD = "argocd"
+	// DefaultArgoNamespace is where Application CRs live when unspecified.
+	DefaultArgoNamespace = "argocd"
+
 	ConditionReady       = "Ready"
 	ConditionProgressing = "Progressing"
 	ConditionExpired     = "Expired"
@@ -208,6 +215,44 @@ type PreviewEnvironmentSpec struct {
 	// ImagePullSecrets for the preview pod.
 	// +optional
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
+
+	// ImagePullPolicy for the preview container (default IfNotPresent; Always for :latest tags if unset by kubelet).
+	// +optional
+	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
+	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
+
+	// Command overrides the container entrypoint.
+	// +optional
+	Command []string `json:"command,omitempty"`
+
+	// Args overrides the container args.
+	// +optional
+	Args []string `json:"args,omitempty"`
+
+	// EnvFrom sources for the preview container.
+	// +optional
+	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
+
+	// ServiceAccountName for preview pods (must exist in targetNamespace).
+	// +optional
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
+
+	// NodeSelector for preview pods.
+	// +optional
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// Tolerations for preview pods.
+	// +optional
+	Tolerations []corev1.Toleration `json:"tolerations,omitempty"`
+
+	// Affinity for preview pods.
+	// +optional
+	Affinity *corev1.Affinity `json:"affinity,omitempty"`
+
+	// TerminationGracePeriodSeconds for preview pods.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	TerminationGracePeriodSeconds *int64 `json:"terminationGracePeriodSeconds,omitempty"`
 
 	// +optional
 	// +kubebuilder:default=baseline

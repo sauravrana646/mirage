@@ -43,6 +43,30 @@ Template:
 
 ---
 
+## 2026-09-17 — Production feature set
+
+**Status:** Accepted
+
+**Context:** Move beyond MVP to shared-cluster usable operator.
+
+**Decision:** Ship validating webhook policies, Helm chart (HA + PDB + topology spread), GitHub preview Action, release workflow, Argo CD backend via unstructured Applications, AI advisory side path, suspend, probes, TLS ingress, NetworkPolicy modes, Prometheus metrics, Events, scheduling fields (nodeSelector/tolerations/affinity), default/max TTL env policy, Progressing/Expired conditions.
+
+**Consequences:** Larger surface area; webhook requires cert-manager (or Helm-generated certs) for cluster installs; Argo backend needs Argo CD CRDs present.
+
+---
+
+## 2026-09-17 — Cross-namespace ownership via labels
+
+**Status:** Accepted
+
+**Context:** Preview workloads live in `targetNamespace`; the CR lives in a management namespace. Kubernetes forbids cross-namespace ownerReferences.
+
+**Decision:** Label children with `mirage.dev/owner-*` and watch Deployments/Services/Ingresses; finalizer owns Namespace lifecycle. Do not attempt ownerRef from CR to children.
+
+**Consequences:** GC is reconcile-driven, not kube-controller-manager ownerRef GC.
+
+---
+
 ## 2026-09-17 — Immutable targetNamespace
 
 **Status:** Accepted

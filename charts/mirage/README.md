@@ -71,6 +71,13 @@ kubectl get validatingwebhookconfiguration
 | `metrics.serviceMonitor.enabled` | `false` | Prometheus Operator ServiceMonitor |
 | `metrics.networkPolicy.enabled` | `false` | NetworkPolicy restricting metrics to `metrics=enabled` namespaces |
 | `argoCD.rbac.enabled` | `true` | ClusterRole rules for `argoproj.io/applications` |
+| `policy.requireDigest` | `false` | Reject images without `@sha256:` |
+| `policy.allowedRegistries` | `""` | Comma-separated image prefix allowlist |
+| `policy.ingressHostSuffix` | `""` | Required Ingress host suffix |
+| `policy.defaultTTLSeconds` | `0` | Default TTL when spec omits `ttlSeconds` |
+| `policy.maxTTLSeconds` | `0` | Max allowed `ttlSeconds` (0 = unlimited) |
+| `podDisruptionBudget.enabled` | `true` | PDB for manager pods |
+| `topologySpreadConstraints` | hostname skew | Spread HA replicas across nodes |
 | `resources` | see `values.yaml` | Container resources |
 | `nodeSelector` / `tolerations` / `affinity` | `{}` / `[]` / `{}` | Scheduling |
 | `podSecurityContext` | restricted PSS | Pod security context |

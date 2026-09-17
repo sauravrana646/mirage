@@ -17,5 +17,7 @@ resources:
   kind: PreviewEnvironment
   path: github.com/sauravrana646/mirage/api/v1alpha1
   version: v1alpha1
-  # Served as apiVersion mirage.dev/v1alpha1 (groupName override in groupversion_info.go)
+  webhooks:
+    validation: true
+    webhookVersion: v1
 version: "3"

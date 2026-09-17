@@ -3,6 +3,7 @@
 # It should be run by config/default
 resources:
 - bases/mirage.dev_previewenvironments.yaml
+- bases/mirage.mirage.dev_previewenvironments.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
