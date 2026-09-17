@@ -67,6 +67,18 @@ Template:
 
 ---
 
+## 2026-09-17 — Security hardening after review
+
+**Status:** Accepted
+
+**Context:** Security/bugbot reviews found AI `workflow_run` checkout of PR SHA with secrets, unconstrained Argo destinations, and open NetworkPolicy ingress.
+
+**Decision:** AI advisory always checks out the default branch and skips fork `workflow_run`; Argo destination forced to `targetNamespace`; baseline NP requires `mirage.dev/ingress-access=true`; deny nginx snippet annotations; ship `values-production.yaml`.
+
+**Consequences:** Operators must label ingress namespaces; demos may use `networkPolicy: permissive`.
+
+---
+
 ## 2026-09-17 — Immutable targetNamespace
 
 **Status:** Accepted

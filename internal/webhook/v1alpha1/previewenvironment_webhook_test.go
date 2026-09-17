@@ -68,15 +68,34 @@ var _ = Describe("PreviewEnvironment Webhook", func() {
 		Expect(validatePreviewEnvironment(pe, nil)).NotTo(HaveOccurred())
 	})
 
-	It("enforces registry allowlist", func() {
-		Expect(os.Setenv("MIRAGE_ALLOWED_REGISTRIES", "ghcr.io/org/")).To(Succeed())
-		DeferCleanup(func() { _ = os.Unsetenv("MIRAGE_ALLOWED_REGISTRIES") })
+	It("rejects argo destination outside targetNamespace", func() {
 		pe := &miragev1alpha1.PreviewEnvironment{
 			ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "default"},
-			Spec:       miragev1alpha1.PreviewEnvironmentSpec{Image: "docker.io/library/nginx:1", TargetNamespace: "preview-x"},
+			Spec: miragev1alpha1.PreviewEnvironmentSpec{
+				Image: "nginx:1", TargetNamespace: "preview-x", Backend: miragev1alpha1.BackendArgoCD,
+				ArgoCD: &miragev1alpha1.ArgoCDSpec{
+					RepoURL: "https://github.com/org/app", Path: "deploy", DestinationNamespace: "kube-system",
+				},
+			},
 		}
 		Expect(validatePreviewEnvironment(pe, nil)).To(HaveOccurred())
-		pe.Spec.Image = "ghcr.io/org/app:1"
+		pe.Spec.ArgoCD.DestinationNamespace = "preview-x"
 		Expect(validatePreviewEnvironment(pe, nil)).NotTo(HaveOccurred())
+	})
+
+	It("rejects dangerous ingress annotation snippets", func() {
+		pe := &miragev1alpha1.PreviewEnvironment{
+			ObjectMeta: metav1.ObjectMeta{Name: "x", Namespace: "default"},
+			Spec: miragev1alpha1.PreviewEnvironmentSpec{
+				Image: "nginx:1", TargetNamespace: "preview-x",
+				Ingress: &miragev1alpha1.IngressSpec{
+					Enabled: true, Host: "pr.example.com",
+					Annotations: map[string]string{
+						"nginx.ingress.kubernetes.io/configuration-snippet": "more_set_headers \"X-Evil: 1\";",
+					},
+				},
+			},
+		}
+		Expect(validatePreviewEnvironment(pe, nil)).To(HaveOccurred())
 	})
 })

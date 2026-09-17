@@ -137,6 +137,20 @@ func validateIngress(pe *miragev1alpha1.PreviewEnvironment) []string {
 			errs = append(errs, "spec.ingress.tls requires host or secretName")
 		}
 	}
+	for key := range pe.Spec.Ingress.Annotations {
+		lk := strings.ToLower(key)
+		for _, bad := range []string{
+			"nginx.ingress.kubernetes.io/configuration-snippet",
+			"nginx.ingress.kubernetes.io/server-snippet",
+			"nginx.ingress.kubernetes.io/stream-snippet",
+			"nginx.ingress.kubernetes.io/auth-snippet",
+			"nginx.ingress.kubernetes.io/modsecurity-snippet",
+		} {
+			if lk == bad {
+				errs = append(errs, fmt.Sprintf("spec.ingress.annotations key %q is not allowed", key))
+			}
+		}
+	}
 	return errs
 }
 
@@ -144,10 +158,19 @@ func validateBackend(pe *miragev1alpha1.PreviewEnvironment) []string {
 	if pe.Spec.Backend != miragev1alpha1.BackendArgoCD {
 		return nil
 	}
+	var errs []string
 	if pe.Spec.ArgoCD == nil || pe.Spec.ArgoCD.RepoURL == "" || pe.Spec.ArgoCD.Path == "" {
-		return []string{"spec.argoCD.repoURL and path are required when backend=argocd"}
+		errs = append(errs, "spec.argoCD.repoURL and path are required when backend=argocd")
+		return errs
 	}
-	return nil
+	dest := pe.Spec.ArgoCD.DestinationNamespace
+	if dest == "" {
+		dest = pe.Spec.TargetNamespace
+	}
+	if dest != pe.Spec.TargetNamespace {
+		errs = append(errs, "spec.argoCD.destinationNamespace must equal spec.targetNamespace")
+	}
+	return errs
 }
 
 func validateTTLAndReplicas(pe *miragev1alpha1.PreviewEnvironment) []string {
@@ -159,15 +182,19 @@ func validateTTLAndReplicas(pe *miragev1alpha1.PreviewEnvironment) []string {
 		errs = append(errs, "spec.ttlSeconds must be >= 0")
 	}
 	if maxTTL := maxTTLFromEnv(); maxTTL > 0 {
-		ttl := int64(0)
-		if pe.Spec.TTLSeconds != nil {
-			ttl = *pe.Spec.TTLSeconds
-		}
+		ttl := effectiveTTLSeconds(pe)
 		if ttl > maxTTL {
-			errs = append(errs, fmt.Sprintf("spec.ttlSeconds %d exceeds max allowed %d", ttl, maxTTL))
+			errs = append(errs, fmt.Sprintf("effective ttlSeconds %d exceeds max allowed %d", ttl, maxTTL))
 		}
 	}
 	return errs
+}
+
+func effectiveTTLSeconds(pe *miragev1alpha1.PreviewEnvironment) int64 {
+	if pe.Spec.TTLSeconds != nil {
+		return *pe.Spec.TTLSeconds
+	}
+	return defaultTTLFromEnv()
 }
 
 func envTruthy(key string) bool {
@@ -176,7 +203,15 @@ func envTruthy(key string) bool {
 }
 
 func maxTTLFromEnv() int64 {
-	raw := strings.TrimSpace(os.Getenv("MIRAGE_MAX_TTL_SECONDS"))
+	return parseIntEnv("MIRAGE_MAX_TTL_SECONDS")
+}
+
+func defaultTTLFromEnv() int64 {
+	return parseIntEnv("MIRAGE_DEFAULT_TTL_SECONDS")
+}
+
+func parseIntEnv(key string) int64 {
+	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
 		return 0
 	}

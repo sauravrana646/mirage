@@ -195,6 +195,11 @@ func (r *PreviewEnvironmentReconciler) ensureNetworkPolicy(ctx context.Context, 
 		np.Spec.PolicyTypes = []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress}
 		np.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{{
 			Ports: []networkingv1.NetworkPolicyPort{{Protocol: protocolPtr(corev1.ProtocolTCP), Port: intstrPtr(port)}},
+			From: []networkingv1.NetworkPolicyPeer{{
+				NamespaceSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"mirage.dev/ingress-access": "true"},
+				},
+			}},
 		}}
 		if mode == miragev1alpha1.NetworkPolicyPermissive {
 			np.Spec.Egress = []networkingv1.NetworkPolicyEgressRule{{}}
@@ -343,8 +348,9 @@ func (r *PreviewEnvironmentReconciler) ensureIngress(ctx context.Context, pe *mi
 	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: pe.Name, Namespace: pe.Spec.TargetNamespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ing, func() error {
 		ing.Labels = r.workloadLabels(pe)
-		if pe.Spec.Ingress.Annotations != nil {
-			ing.Annotations = pe.Spec.Ingress.Annotations
+		ing.Annotations = pe.Spec.Ingress.Annotations
+		if ing.Annotations == nil {
+			ing.Annotations = map[string]string{}
 		}
 		ing.Spec.IngressClassName = pe.Spec.Ingress.IngressClassName
 		ing.Spec.Rules = []networkingv1.IngressRule{{
@@ -376,6 +382,24 @@ func (r *PreviewEnvironmentReconciler) deleteIngressIfPresent(ctx context.Contex
 	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: pe.Name, Namespace: pe.Spec.TargetNamespace}}
 	if err := r.Delete(ctx, ing); err != nil && !apierrors.IsNotFound(err) {
 		return err
+	}
+	return nil
+}
+
+// cleanupDirectWorkloads removes Deployment/Service/Ingress when switching away from the direct backend.
+func (r *PreviewEnvironmentReconciler) cleanupDirectWorkloads(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
+	ns := pe.Spec.TargetNamespace
+	if ns == "" {
+		return nil
+	}
+	for _, obj := range []client.Object{
+		&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: pe.Name, Namespace: ns}},
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: pe.Name, Namespace: ns}},
+		&networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: pe.Name, Namespace: ns}},
+	} {
+		if err := r.Delete(ctx, obj); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
 	}
 	return nil
 }

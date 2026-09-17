@@ -18,7 +18,7 @@ Mirage creates short-lived preview environments for pull requests and tears them
 | CI | GitHub Action: build→digest→upsert CR→PR comment; least-privilege CI Role; release to GHCR |
 | Admission | Validating webhook (digest, registry allowlist, ingress host suffix, Argo fields, max TTL) |
 | AI | Side-path failure summaries (`ai/`) — never in reconcile |
-| Package | Helm chart (`charts/mirage`), HA replicas, PDB, topology spread, ServiceMonitor, webhook TLS |
+| Package | Helm chart (`charts/mirage`), HA replicas, PDB, topology spread, ServiceMonitor, webhook TLS, `values-production.yaml` |
 
 ## Install (Helm)
 
@@ -34,7 +34,7 @@ helm upgrade --install mirage charts/mirage \
   --set webhook.enabled=true
 ```
 
-See [`charts/mirage/README.md`](./charts/mirage/README.md).
+See [`charts/mirage/README.md`](./charts/mirage/README.md). For shared clusters, also apply `charts/mirage/values-production.yaml` and set `policy.allowedRegistries` / `policy.ingressHostSuffix`.
 
 ## Local dev loop
 

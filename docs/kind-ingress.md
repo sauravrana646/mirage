@@ -36,3 +36,10 @@ kubectl get previewenvironments -o wide
 
 - Other ingress controllers / Gateway API are out of scope until this path works.
 - Preview workloads use restricted container securityContext; prefer unprivileged images (sample uses `nginxinc/nginx-unprivileged`).
+- Baseline NetworkPolicy only allows ingress from namespaces labeled `mirage.dev/ingress-access=true`. Label the ingress controller namespace:
+
+```bash
+kubectl label ns ingress-nginx mirage.dev/ingress-access=true
+```
+
+  Or set `spec.networkPolicy: permissive` / `disabled` for local demos.

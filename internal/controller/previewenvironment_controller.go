@@ -164,6 +164,11 @@ func (r *PreviewEnvironmentReconciler) handleExpiry(ctx context.Context, pe *mir
 		Reason: miragev1alpha1.ReasonExpiring, Message: "TTL elapsed; deleting preview",
 		URL: pe.Status.URL, ExpiresAt: expiresAt,
 	})
+	if pe.Spec.Backend == miragev1alpha1.BackendArgoCD {
+		if err := r.deleteArgoApplication(ctx, pe); err != nil {
+			return true, err
+		}
+	}
 	if err := r.cleanupTarget(ctx, pe); err != nil {
 		return true, err
 	}
@@ -193,7 +198,13 @@ func (r *PreviewEnvironmentReconciler) reconcileActive(ctx context.Context, pe *
 	}
 
 	if backend == miragev1alpha1.BackendArgoCD {
+		if err := r.cleanupDirectWorkloads(ctx, pe); err != nil {
+			return ctrl.Result{}, err
+		}
 		return r.reconcileArgo(ctx, pe, expiresAt)
+	}
+	if err := r.deleteArgoApplication(ctx, pe); err != nil {
+		return ctrl.Result{}, err
 	}
 	return r.reconcileDirect(ctx, pe, expiresAt)
 }
@@ -221,7 +232,7 @@ func (r *PreviewEnvironmentReconciler) reconcileDirect(ctx context.Context, pe *
 			reason = miragev1alpha1.ReasonRolloutFailed
 			phase = miragev1alpha1.PhaseFailed
 		}
-	} else {
+	} else if !meta.IsStatusConditionTrue(pe.Status.Conditions, miragev1alpha1.ConditionReady) {
 		r.record(pe, corev1.EventTypeNormal, miragev1alpha1.ReasonWorkloadReady, "Preview ready")
 		previewsReady.Inc()
 	}
@@ -287,7 +298,14 @@ func previewURL(pe *miragev1alpha1.PreviewEnvironment) string {
 		if pe.Spec.Ingress.TLS != nil && pe.Spec.Ingress.TLS.Enabled {
 			scheme = "https"
 		}
-		return scheme + "://" + pe.Spec.Ingress.Host
+		path := pe.Spec.Ingress.Path
+		if path == "" || path == "/" {
+			return scheme + "://" + pe.Spec.Ingress.Host
+		}
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		return scheme + "://" + pe.Spec.Ingress.Host + path
 	}
 	return ""
 }

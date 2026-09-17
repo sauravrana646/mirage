@@ -55,7 +55,14 @@ gather_evidence() {
   tmp="$(mktemp)"
   {
     echo "=== PreviewEnvironment ==="
-    kubectl -n "$PE_NAMESPACE" get previewenvironment "$PE_NAME" -o yaml 2>&1 || echo "(not found)"
+    # Drop env / envFrom before any LLM or log export.
+    kubectl -n "$PE_NAMESPACE" get previewenvironment "$PE_NAME" -o json 2>/dev/null \
+      | jq 'del(.spec.env, .spec.envFrom, .metadata.managedFields)' 2>/dev/null \
+      | redact \
+      || kubectl -n "$PE_NAMESPACE" get previewenvironment "$PE_NAME" -o yaml 2>&1 \
+         | sed '/^[[:space:]]*env:/,/^[[:space:]]*[a-zA-Z]/d' \
+         | redact \
+      || echo "(not found)"
     echo
     echo "=== Events (PE namespace) ==="
     kubectl -n "$PE_NAMESPACE" get events --field-selector "involvedObject.name=${PE_NAME}" \

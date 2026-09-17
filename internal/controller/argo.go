@@ -23,6 +23,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -99,10 +100,7 @@ func (r *PreviewEnvironmentReconciler) ensureArgoApplication(ctx context.Context
 	if argoNS == "" {
 		argoNS = miragev1alpha1.DefaultArgoNamespace
 	}
-	destNS := spec.DestinationNamespace
-	if destNS == "" {
-		destNS = pe.Spec.TargetNamespace
-	}
+	destNS := pe.Spec.TargetNamespace
 	project := spec.Project
 	if project == "" {
 		project = "default"
@@ -157,7 +155,7 @@ func (r *PreviewEnvironmentReconciler) deleteArgoApplication(ctx context.Context
 	app.SetGroupVersionKind(argoApplicationGVK)
 	app.SetName(pe.Name)
 	app.SetNamespace(argoNS)
-	if err := r.Delete(ctx, app); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Delete(ctx, app); err != nil && !apierrors.IsNotFound(err) && !meta.IsNoMatchError(err) {
 		return err
 	}
 	return nil
