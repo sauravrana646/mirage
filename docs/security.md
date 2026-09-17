@@ -25,10 +25,10 @@
 
 | Phase | Baseline |
 |-------|----------|
-| 2 | Finalizer cleanup; ownership labels; NamespaceConflict handling |
-| 3 | Prefer ResourceQuota + LimitRange as soon as the cluster is shared |
+| 2 | Finalizer cleanup; ownership labels; NamespaceConflict handling; default ResourceQuota + LimitRange; restricted pod securityContext |
+| 3 | Ingress docs (nginx + nip.io); prefer unprivileged images |
 | 4 | Document + sample least-privilege Role for GitHub Action kube credentials |
-| 5 | Quota/LimitRange defaults on; optional NetworkPolicy; PSA when leaving personal kind |
+| 5 | Optional NetworkPolicy; Helm chart; PSA when leaving personal kind |
 | 7 | Redaction policy for AI |
 
 ## Explicit non-goals early
