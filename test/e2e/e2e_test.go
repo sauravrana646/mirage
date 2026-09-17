@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -139,33 +140,39 @@ var _ = Describe("Manager", Ordered, func() {
 
 	Context("Manager", func() {
 		It("should run successfully", func() {
-			By("validating that the controller-manager pod is running as expected")
+			By("validating that the controller-manager pods are running as expected")
 			verifyControllerUp := func(g Gomega) {
-				// Get the name of the controller-manager pod
-				cmd := exec.Command("kubectl", "get",
+				// Match Deployment replicas (HA default is 2).
+				cmd := exec.Command("kubectl", "get", "deployment", "mirage-controller-manager",
+					"-n", namespace, "-o", "jsonpath={.spec.replicas}")
+				replicasOut, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to read controller-manager replicas")
+				wantReplicas := 1
+				if replicasOut != "" {
+					_, _ = fmt.Sscanf(replicasOut, "%d", &wantReplicas)
+				}
+
+				cmd = exec.Command("kubectl", "get",
 					"pods", "-l", "control-plane=controller-manager",
 					"-o", "go-template={{ range .items }}"+
 						"{{ if not .metadata.deletionTimestamp }}"+
-						"{{ .metadata.name }}"+
-						"{{ \"\\n\" }}{{ end }}{{ end }}",
+						"{{ .metadata.name }}={{ .status.phase }}{{ \"\\n\" }}{{ end }}{{ end }}",
 					"-n", namespace,
 				)
-
 				podOutput, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve controller-manager pod information")
-				podNames := utils.GetNonEmptyLines(podOutput)
-				g.Expect(podNames).To(HaveLen(1), "expected 1 controller pod running")
-				controllerPodName = podNames[0]
+				lines := utils.GetNonEmptyLines(podOutput)
+				running := make([]string, 0, len(lines))
+				for _, line := range lines {
+					name, phase, ok := strings.Cut(line, "=")
+					if ok && phase == "Running" {
+						running = append(running, name)
+					}
+				}
+				g.Expect(running).To(HaveLen(wantReplicas),
+					"expected %d Running controller pods, got %v from %v", wantReplicas, running, lines)
+				controllerPodName = running[0]
 				g.Expect(controllerPodName).To(ContainSubstring("controller-manager"))
-
-				// Validate the pod's status
-				cmd = exec.Command("kubectl", "get",
-					"pods", controllerPodName, "-o", "jsonpath={.status.phase}",
-					"-n", namespace,
-				)
-				output, err := utils.Run(cmd)
-				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(Equal("Running"), "Incorrect controller-manager pod status")
 			}
 			Eventually(verifyControllerUp).Should(Succeed())
 		})

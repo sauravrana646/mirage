@@ -1,7 +1,8 @@
 resources:
 - issuer.yaml
 - certificate-webhook.yaml
-- certificate-metrics.yaml
+# metrics-certs is optional; enable with METRICS-WITH-CERTS patches in config/default.
+# - certificate-metrics.yaml
 
 configurations:
 - kustomizeconfig.yaml
