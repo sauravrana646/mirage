@@ -40,8 +40,8 @@ Locked defaults (see decisions): **Namespaced** CR, **finalizer-managed** `targe
 - Kubebuilder layout, code generation, manager main  
 
 ### Done when
-- [ ] CRD installed; `kubectl get previewenvironments -n mirage-system` works  
-- [ ] Manager pod Running (or `make run` against kind)  
+- [x] CRD installed; `kubectl get previewenvironments -n mirage-system` works  
+- [x] Manager pod Running (or `make run` against kind)  
 
 ---
 
@@ -80,10 +80,10 @@ Split into **2a** (create path) and **2b** (delete + failure) if velocity drops 
 - Idempotent create/update, finalizers, conditions, ownerRefs, requeue  
 
 ### Done when
-- [ ] `kubectl apply -f config/samples/...` → pods Ready; status Ready  
-- [ ] `kubectl delete` CR → target namespace and children gone  
-- [ ] Conflict / pull failure sets Failed (or Ready=False) meaningfully  
-- [ ] envtest covers create + delete (and one failure if practical)  
+- [x] `kubectl apply -f config/samples/...` → pods Ready; status Ready  
+- [x] `kubectl delete` CR → target namespace and children gone  
+- [x] Conflict / pull failure sets Failed (or Ready=False) meaningfully  
+- [x] envtest covers create + delete (and one failure if practical)  
 
 ---
 
