@@ -1,0 +1,21 @@
+apiVersion: v2
+name: mirage
+description: Ephemeral PR preview environments for Kubernetes — Mirage operator
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/sauravrana646/mirage
+sources:
+  - https://github.com/sauravrana646/mirage
+keywords:
+  - mirage
+  - preview
+  - operator
+  - kubernetes
+  - ephemeral
+maintainers:
+  - name: Saurav Rana
+    url: https://github.com/sauravrana646
+annotations:
+  catalogs.artifacthub.io/operator: "true"
+  catalogs.artifacthub.io/operatorCapabilities: basic install

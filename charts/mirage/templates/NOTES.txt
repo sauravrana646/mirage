@@ -1,0 +1,41 @@
+{{/*
+Mirage operator installed.
+*/}}
+1. Verify the controller is running:
+
+  kubectl get pods -n {{ include "mirage.namespace" . }} -l app.kubernetes.io/instance={{ .Release.Name }}
+
+2. CRDs are shipped under charts/mirage/crds/ and are installed automatically by Helm
+   on first install. To install/update CRDs manually instead:
+
+  kubectl apply -f https://raw.githubusercontent.com/sauravrana646/mirage/main/config/crd/bases/mirage.dev_previewenvironments.yaml
+  # or from a local checkout:
+  make install
+  # or:
+  kubectl apply -f config/crd/bases/
+
+3. Create a PreviewEnvironment:
+
+  kubectl apply -f config/samples/mirage_v1alpha1_previewenvironment.yaml
+
+{{- if .Values.webhook.enabled }}
+
+4. Validating webhook is ENABLED (CREATE/UPDATE on PreviewEnvironment).
+   {{- if .Values.webhook.certManager.enabled }}
+   Ensure cert-manager is installed so the serving Certificate can be issued.
+   {{- end }}
+{{- else }}
+
+4. Validating webhook is DISABLED. Enable with --set webhook.enabled=true
+{{- end }}
+
+{{- if and .Values.metrics.enabled .Values.metrics.serviceMonitor.enabled }}
+
+5. ServiceMonitor is enabled for Prometheus Operator scrapes on port 8443.
+{{- else if .Values.metrics.enabled }}
+
+5. Metrics are exposed on Service {{ include "mirage.metricsServiceName" . }}:{{ .Values.metrics.service.port }}.
+   Enable a ServiceMonitor with --set metrics.serviceMonitor.enabled=true
+{{- end }}
+
+For more: https://github.com/sauravrana646/mirage
