@@ -21,3 +21,11 @@ jobs:
         run: |
           go mod tidy
           make test
+
+      - name: Build CLI
+        run: make build-cli
+
+      - name: Verify generate and manifests are clean
+        run: |
+          make generate manifests
+          git diff --exit-code

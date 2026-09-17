@@ -3,4 +3,7 @@ resources:
 - mirage_v1alpha1_previewenvironment.yaml
 - previewenvironment_production.yaml
 - previewenvironment_argocd.yaml
+- previewtemplate_standard.yaml
+- previewenvironment_multiservice.yaml
+- previewenvironment_dependencies.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

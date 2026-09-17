@@ -11,7 +11,7 @@ Production Helm chart for the [Mirage](https://github.com/sauravrana646/mirage) 
 
 ## CRDs
 
-CRDs live in **`crds/`** (`crds/previewenvironment.yaml`) and are installed automatically on `helm install`.
+CRDs live in **`crds/`** (`previewenvironment.yaml`, `previewtemplate.yaml`) and are installed automatically on `helm install`.
 
 Helm 3 installs CRDs from `crds/` once and does **not** upgrade or delete them on chart upgrade/uninstall. To update CRDs after a release:
 
