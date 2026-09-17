@@ -94,8 +94,8 @@ func (r *PreviewEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	expiresAt := computeExpiresAt(pe, time.Now())
-	if expired, result, err := r.handleExpiry(ctx, pe, expiresAt); expired {
-		return result, err
+	if expired, err := r.handleExpiry(ctx, pe, expiresAt); expired {
+		return ctrl.Result{}, err
 	}
 
 	return r.reconcileActive(ctx, pe, expiresAt)
@@ -130,22 +130,22 @@ func (r *PreviewEnvironmentReconciler) handleExpiry(
 	ctx context.Context,
 	pe *miragev1alpha1.PreviewEnvironment,
 	expiresAt *metav1.Time,
-) (handled bool, result ctrl.Result, err error) {
+) (handled bool, err error) {
 	if expiresAt == nil || expiresAt.After(time.Now()) {
-		return false, ctrl.Result{}, nil
+		return false, nil
 	}
 	log.FromContext(ctx).Info("TTL expired; cleaning up preview", "expiresAt", expiresAt.Time)
 	if err := r.patchStatus(ctx, pe, miragev1alpha1.PhaseExpiring, metav1.ConditionFalse,
 		miragev1alpha1.ReasonExpiring, "TTL elapsed; deleting preview", pe.Status.URL, expiresAt); err != nil {
-		return true, ctrl.Result{}, err
+		return true, err
 	}
 	if err := r.cleanupTarget(ctx, pe); err != nil {
-		return true, ctrl.Result{}, err
+		return true, err
 	}
 	if err := r.Delete(ctx, pe); err != nil && !apierrors.IsNotFound(err) {
-		return true, ctrl.Result{}, err
+		return true, err
 	}
-	return true, ctrl.Result{}, nil
+	return true, nil
 }
 
 func (r *PreviewEnvironmentReconciler) reconcileActive(
