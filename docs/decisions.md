@@ -67,6 +67,18 @@ Template:
 
 ---
 
+## 2026-09-17 — Multi-SCM status reporting
+
+**Status:** Accepted
+
+**Context:** Teams need preview status and URLs on GitHub, GitLab, and Bitbucket PRs/MRs, with optional SSO/OIDC-brokered tokens.
+
+**Decision:** Ship `internal/scm` + `mirage-notify` CLI used from CI templates (GitHub Actions, GitLab CI, Bitbucket Pipelines). Support `auth=token|oidc`. Expand `spec.source` with `provider`, `projectID`, `workspace`, `repoSlug`. Never call SCM from reconcile.
+
+**Consequences:** Each platform needs a token (or OIDC-minted bearer) with status + comment scopes; cluster apply remains separate (kubeconfig or OIDC→IAM).
+
+---
+
 ## 2026-09-17 — Security hardening after review
 
 **Status:** Accepted

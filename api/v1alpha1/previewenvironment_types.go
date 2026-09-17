@@ -32,6 +32,11 @@ const (
 	AnnotationAISummary = "mirage.dev/ai-summary"
 	AnnotationAIRisk    = "mirage.dev/ai-risk"
 
+	// SCM providers for SourceSpec.Provider / mirage-notify.
+	SCMProviderGitHub    = "github"
+	SCMProviderGitLab    = "gitlab"
+	SCMProviderBitbucket = "bitbucket"
+
 	// BackendDirect applies Deployment/Service/Ingress directly.
 	BackendDirect = "direct"
 	// BackendArgoCD creates an Argo CD Application instead of direct apply.
@@ -62,16 +67,30 @@ const (
 	ReasonArgoHealthy       = "ArgoHealthy"
 )
 
-// SourceSpec identifies the git/PR origin of a preview.
+// SourceSpec identifies the git/PR/MR origin of a preview.
 type SourceSpec struct {
+	// Provider is the SCM system: github, gitlab, or bitbucket.
+	// +optional
+	// +kubebuilder:validation:Enum=github;gitlab;bitbucket
+	Provider string `json:"provider,omitempty"`
 	// +optional
 	Repo string `json:"repo,omitempty"`
+	// PullRequest is the GitHub PR / GitLab MR / Bitbucket PR number.
 	// +optional
 	PullRequest int `json:"pullRequest,omitempty"`
 	// +optional
 	CommitSHA string `json:"commitSHA,omitempty"`
 	// +optional
 	Branch string `json:"branch,omitempty"`
+	// ProjectID is the GitLab project ID or path (group/project).
+	// +optional
+	ProjectID string `json:"projectID,omitempty"`
+	// Workspace is the Bitbucket Cloud workspace slug.
+	// +optional
+	Workspace string `json:"workspace,omitempty"`
+	// RepoSlug is the Bitbucket repository slug when different from the URL path.
+	// +optional
+	RepoSlug string `json:"repoSlug,omitempty"`
 }
 
 // TLSSpec configures optional Ingress TLS.

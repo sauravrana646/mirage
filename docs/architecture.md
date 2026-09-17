@@ -73,8 +73,9 @@ See [security.md](./security.md).
 
 ## 6. Extensibility
 
-- **Backends:** `direct` (default) vs `argocd` (Phase 6).
-- **Sources:** image digest from CI first; git+build in-cluster is out of scope for early phases.
+- **Backends:** `direct` (default) vs `argocd`.
+- **Sources:** image digest from CI; git+build in-cluster is out of scope.
+- **SCM reporting:** `mirage-notify` CLI posts commit status + PR/MR comments to GitHub, GitLab, or Bitbucket (token or OIDC-brokered bearer). Never inside reconcile.
 - **AI:** annotation/status fields as contracts; implementation outside manager.
 
 ## 7. Non-requirements of this diagram

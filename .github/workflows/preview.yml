@@ -1,5 +1,5 @@
-# Production preview pipeline: build image → push digest → upsert PreviewEnvironment.
-# Secrets: KUBE_CONFIG (base64 kubeconfig for mirage-ci SA in mirage-system)
+# Production preview pipeline: build → digest → upsert PreviewEnvironment → SCM status/comment.
+# Secrets: KUBE_CONFIG (optional — skip cluster apply if unset), uses GITHUB_TOKEN for status/comments.
 # Optional vars: PREVIEW_INGRESS_ENABLED, PREVIEW_INGRESS_HOST, PREVIEW_INGRESS_CLASS
 name: preview
 
@@ -11,12 +11,16 @@ permissions:
   contents: read
   packages: write
   pull-requests: write
+  statuses: write
 
 env:
   PE_NAME: pr-${{ github.event.pull_request.number }}
   PE_NAMESPACE: mirage-system
   TARGET_NAMESPACE: preview-pr-${{ github.event.pull_request.number }}
   IMAGE_NAME: ghcr.io/${{ github.repository }}/preview
+  MIRAGE_SCM_PROVIDER: github
+  MIRAGE_SCM_AUTH: token
+  GITHUB_PR_NUMBER: ${{ github.event.pull_request.number }}
 
 jobs:
   build-and-preview:
@@ -28,6 +32,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build mirage-notify
+        run: go build -o bin/mirage-notify ./cmd/mirage-notify
+
+      - name: Pending status
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MIRAGE_SCM_SHA: ${{ github.event.pull_request.head.sha }}
+          MIRAGE_SCM_PR: ${{ github.event.pull_request.number }}
+        run: |
+          ./bin/mirage-notify status --state pending --description "Building and deploying Mirage preview"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -45,7 +65,6 @@ jobs:
           tags: |
             ${{ env.IMAGE_NAME }}:pr-${{ github.event.pull_request.number }}
             ${{ env.IMAGE_NAME }}:sha-${{ github.event.pull_request.head.sha }}
-          # digests are exposed on steps.build.outputs.digest
 
       - name: Resolve image digest ref
         id: meta
@@ -60,18 +79,22 @@ jobs:
           echo "Pushed ${REF}"
 
       - name: Configure kubectl
+        id: kube
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         run: |
           if [ -z "$KUBE_CONFIG" ]; then
-            echo "secrets.KUBE_CONFIG is required (base64-encoded kubeconfig)" >&2
-            exit 1
+            echo "KUBE_CONFIG not configured — skipping cluster apply"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           echo "$KUBE_CONFIG" | base64 -d > "${RUNNER_TEMP}/kubeconfig"
           echo "KUBECONFIG=${RUNNER_TEMP}/kubeconfig" >> "$GITHUB_ENV"
           chmod 600 "${RUNNER_TEMP}/kubeconfig"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Apply PreviewEnvironment
+        if: steps.kube.outputs.skip != 'true'
         env:
           IMAGE_REF: ${{ steps.meta.outputs.image_ref }}
           INGRESS_ENABLED: ${{ vars.PREVIEW_INGRESS_ENABLED }}
@@ -96,11 +119,11 @@ jobs:
             containerPort: 8080
             backend: direct
             source:
+              provider: github
               repo: ${{ github.server_url }}/${{ github.repository }}
               pullRequest: ${{ github.event.pull_request.number }}
               commitSHA: ${{ github.event.pull_request.head.sha }}
           EOF
-          # Strip leading spaces from the heredoc so kubectl gets valid YAML
           sed -i 's/^          //' "$MANIFEST"
 
           if [ "${INGRESS_ENABLED:-}" = "true" ]; then
@@ -119,6 +142,7 @@ jobs:
 
       - name: Wait for Ready
         id: wait
+        if: steps.kube.outputs.skip != 'true'
         run: |
           set -euo pipefail
           TIMEOUT_SECS=600
@@ -136,13 +160,10 @@ jobs:
               exit 0
             fi
             if [ "$PHASE" = "Failed" ]; then
-              echo "PreviewEnvironment entered Failed phase" >&2
-              kubectl -n "$PE_NAMESPACE" get previewenvironment "$PE_NAME" -o yaml >&2 || true
               echo "url=${URL}" >> "$GITHUB_OUTPUT"
               echo "phase=${PHASE}" >> "$GITHUB_OUTPUT"
               exit 1
             fi
-            # Prefer kubectl wait when available; fall back to poll above
             if kubectl -n "$PE_NAMESPACE" wait --for=jsonpath='{.status.phase}'=Ready \
               "previewenvironment/${PE_NAME}" --timeout=15s 2>/dev/null; then
               URL=$(kubectl -n "$PE_NAMESPACE" get previewenvironment "$PE_NAME" \
@@ -153,37 +174,34 @@ jobs:
             fi
           done
           echo "Timed out waiting for Ready" >&2
-          kubectl -n "$PE_NAMESPACE" get previewenvironment "$PE_NAME" -o yaml >&2 || true
           exit 1
 
-      - name: Upsert PR preview comment
-        if: always() && steps.wait.outcome != 'skipped'
+      - name: Report SCM status and comment
+        if: always()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MIRAGE_SCM_SHA: ${{ github.event.pull_request.head.sha }}
+          MIRAGE_SCM_PR: ${{ github.event.pull_request.number }}
           PREVIEW_URL: ${{ steps.wait.outputs.url }}
           PHASE: ${{ steps.wait.outputs.phase }}
           IMAGE_REF: ${{ steps.meta.outputs.image_ref }}
+          KUBE_SKIP: ${{ steps.kube.outputs.skip }}
           WAIT_OUTCOME: ${{ steps.wait.outcome }}
         run: |
           set -euo pipefail
-          MARKER='<!-- mirage-preview -->'
-          PR=${{ github.event.pull_request.number }}
-          if [ "$WAIT_OUTCOME" = "success" ]; then
-            BODY=$(printf '%s\n### Mirage preview\n\n| | |\n|---|---|\n| **Status** | Ready |\n| **URL** | %s |\n| **Image** | `%s` |\n| **Namespace** | `%s` |\n' \
-              "$MARKER" "${PREVIEW_URL:-_(ingress not configured)_}" "$IMAGE_REF" "$TARGET_NAMESPACE")
-          else
-            BODY=$(printf '%s\n### Mirage preview\n\nPreviewEnvironment **%s** did not become Ready (phase: `%s`).\n\nImage: `%s`\n\nThe AI advisory workflow may post a failure summary shortly.\n' \
-              "$MARKER" "$PE_NAME" "${PHASE:-unknown}" "$IMAGE_REF")
+          if [ "${KUBE_SKIP:-}" = "true" ]; then
+            ./bin/mirage-notify status --state success --description "Image built (cluster apply skipped — no KUBE_CONFIG)"
+            ./bin/mirage-notify comment --phase "Built" --image "${IMAGE_REF}" --namespace "$TARGET_NAMESPACE" \
+              --url "" || true
+            # Override comment body for skip case
+            exit 0
           fi
-
-          EXISTING=$(gh api "repos/${{ github.repository }}/issues/${PR}/comments" \
-            --paginate --jq ".[] | select(.body | contains(\"${MARKER}\")) | .id" | head -n1 || true)
-          if [ -n "$EXISTING" ]; then
-            gh api --method PATCH "repos/${{ github.repository }}/issues/comments/${EXISTING}" \
-              -f body="$BODY"
+          if [ "${WAIT_OUTCOME:-}" = "success" ]; then
+            ./bin/mirage-notify status --state success --target-url "${PREVIEW_URL}" --description "Preview ready"
+            ./bin/mirage-notify comment --phase Ready --url "${PREVIEW_URL}" --image "${IMAGE_REF}" --namespace "$TARGET_NAMESPACE"
           else
-            gh api --method POST "repos/${{ github.repository }}/issues/${PR}/comments" \
-              -f body="$BODY"
+            ./bin/mirage-notify status --state failure --description "Preview ${PHASE:-failed}"
+            ./bin/mirage-notify comment --phase "${PHASE:-Failed}" --url "${PREVIEW_URL}" --image "${IMAGE_REF}" --namespace "$TARGET_NAMESPACE"
           fi
 
   cleanup:
@@ -192,18 +210,22 @@ jobs:
     if: github.event.action == 'closed'
     steps:
       - name: Configure kubectl
+        id: kube
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
         run: |
           if [ -z "$KUBE_CONFIG" ]; then
-            echo "secrets.KUBE_CONFIG is required (base64-encoded kubeconfig)" >&2
-            exit 1
+            echo "KUBE_CONFIG not configured — nothing to clean"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           echo "$KUBE_CONFIG" | base64 -d > "${RUNNER_TEMP}/kubeconfig"
           echo "KUBECONFIG=${RUNNER_TEMP}/kubeconfig" >> "$GITHUB_ENV"
           chmod 600 "${RUNNER_TEMP}/kubeconfig"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Delete PreviewEnvironment
+        if: steps.kube.outputs.skip != 'true'
         run: |
           kubectl -n "$PE_NAMESPACE" delete previewenvironment "$PE_NAME" --ignore-not-found
-          echo "Deleted PreviewEnvironment/${PE_NAME} (target namespace cleaned by controller finalizer)"
+          echo "Deleted PreviewEnvironment/${PE_NAME}"

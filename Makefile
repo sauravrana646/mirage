@@ -94,6 +94,11 @@ lint-config: golangci-lint ## Verify golangci-lint linter configuration
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binary.
 	go build -o bin/manager cmd/main.go
+	go build -o bin/mirage-notify ./cmd/mirage-notify
+
+.PHONY: build-notify
+build-notify: ## Build mirage-notify SCM CLI.
+	go build -o bin/mirage-notify ./cmd/mirage-notify
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.

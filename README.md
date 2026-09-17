@@ -15,7 +15,7 @@ Mirage creates short-lived preview environments for pull requests and tears them
 | Access | Optional Ingress (path, annotations, TLS), nginx+nip.io docs |
 | Scheduling | nodeSelector, tolerations, affinity, priorityClass, grace period |
 | GitOps | `backend: argocd` creates Argo CD Applications |
-| CI | GitHub Action: build→digest→upsert CR→PR comment; least-privilege CI Role; release to GHCR |
+| CI | GitHub / GitLab / Bitbucket: build→digest→upsert CR→**commit status + PR/MR comment** via `mirage-notify`; OIDC/SSO token auth supported |
 | Admission | Validating webhook (digest, registry allowlist, ingress host suffix, Argo fields, max TTL) |
 | AI | Side-path failure summaries (`ai/`) — never in reconcile |
 | Package | Helm chart (`charts/mirage`), HA replicas, PDB, topology spread, ServiceMonitor, webhook TLS, `values-production.yaml` |
@@ -67,6 +67,7 @@ kubectl get previewenvironments
 | [Security](./docs/security.md) | Threat model & baselines |
 | [Decisions](./docs/decisions.md) | ADR log |
 | [kind Ingress](./docs/kind-ingress.md) | nginx + nip.io |
+| [SCM integration](./docs/scm-integration.md) | GitHub / GitLab / Bitbucket status + comments + OIDC |
 | [Prior art](./docs/prior-art.md) | Alternatives |
 | [AI path](./ai/README.md) | Advisory side path |
 

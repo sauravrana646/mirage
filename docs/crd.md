@@ -17,10 +17,14 @@ metadata:
   namespace: mirage-system
 spec:
   source:
+    provider: github          # github | gitlab | bitbucket
     repo: https://github.com/org/app
     pullRequest: 42
     commitSHA: abcdef0123
     branch: feature/x
+    # projectID: group/app    # GitLab
+    # workspace: my-ws        # Bitbucket
+    # repoSlug: app           # Bitbucket
 
   image: ghcr.io/org/app@sha256:...   # prefer digest
   requireDigest: true                 # also MIRAGE_REQUIRE_DIGEST
