@@ -258,9 +258,13 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("getting the metrics by checking curl-metrics logs")
 			metricsOutput := getMetricsOutput()
-			Expect(metricsOutput).To(ContainSubstring(
-				"controller_runtime_reconcile_total",
-			))
+			// Reconcile counters may be absent until the first reconcile; webhook/cert
+			// metrics are registered as soon as the manager serves /metrics.
+			Expect(metricsOutput).To(Or(
+				ContainSubstring("controller_runtime_reconcile_total"),
+				ContainSubstring("controller_runtime_webhook_requests_total"),
+				ContainSubstring("certwatcher_read_certificate_total"),
+			), "expected controller-runtime metrics on /metrics")
 		})
 
 		It("should provisioned cert-manager", func() {
