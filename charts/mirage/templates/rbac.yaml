@@ -1,0 +1,126 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "mirage.fullname" . }}-manager-role
+  labels:
+    {{- include "mirage.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+  - apiGroups: [""]
+    resources: [limitranges, namespaces, resourcequotas, services]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [mirage.dev]
+    resources: [previewenvironments]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: [mirage.dev]
+    resources: [previewenvironments/finalizers]
+    verbs: [update]
+  - apiGroups: [mirage.dev]
+    resources: [previewenvironments/status]
+    verbs: [get, patch, update]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses, networkpolicies]
+    verbs: [create, delete, get, list, patch, update, watch]
+  {{- if .Values.argoCD.rbac.enabled }}
+  # Optional Argo CD Application permissions for the argocd backend.
+  - apiGroups: [argoproj.io]
+    resources: [applications]
+    verbs: [get, list, watch, create, update, patch, delete]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "mirage.fullname" . }}-manager-rolebinding
+  labels:
+    {{- include "mirage.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "mirage.fullname" . }}-manager-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mirage.serviceAccountName" . }}
+    namespace: {{ include "mirage.namespace" . }}
+---
+# Leader election (namespaced)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "mirage.fullname" . }}-leader-election-role
+  namespace: {{ include "mirage.namespace" . }}
+  labels:
+    {{- include "mirage.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "mirage.fullname" . }}-leader-election-rolebinding
+  namespace: {{ include "mirage.namespace" . }}
+  labels:
+    {{- include "mirage.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "mirage.fullname" . }}-leader-election-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mirage.serviceAccountName" . }}
+    namespace: {{ include "mirage.namespace" . }}
+{{- if .Values.metrics.enabled }}
+---
+# Metrics auth: TokenReview / SubjectAccessReview for secure metrics
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "mirage.fullname" . }}-metrics-auth-role
+  labels:
+    {{- include "mirage.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [authentication.k8s.io]
+    resources: [tokenreviews]
+    verbs: [create]
+  - apiGroups: [authorization.k8s.io]
+    resources: [subjectaccessreviews]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "mirage.fullname" . }}-metrics-auth-rolebinding
+  labels:
+    {{- include "mirage.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "mirage.fullname" . }}-metrics-auth-role
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "mirage.serviceAccountName" . }}
+    namespace: {{ include "mirage.namespace" . }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "mirage.fullname" . }}-metrics-reader
+  labels:
+    {{- include "mirage.labels" . | nindent 4 }}
+rules:
+  - nonResourceURLs: ["/metrics"]
+    verbs: [get]
+{{- end }}

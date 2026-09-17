@@ -1,0 +1,155 @@
+# GitLab CI — build digest, upsert PreviewEnvironment, report status/comments.
+# Variables (CI/CD settings):
+#   KUBE_CONFIG          — base64 kubeconfig for mirage-ci (or use OIDC→IAM)
+#   MIRAGE_SCM_TOKEN     — optional; defaults to CI_JOB_TOKEN for statuses/notes
+#   PREVIEW_INGRESS_*    — optional ingress host/class
+#
+# Self-hosted GitLab: set MIRAGE_SCM_BASE_URL=https://gitlab.example.com/api/v4
+
+stages:
+  - build
+  - preview
+  - cleanup
+
+variables:
+  PE_NAMESPACE: mirage-system
+  IMAGE_NAME: ${CI_REGISTRY_IMAGE}/preview
+  MIRAGE_SCM_PROVIDER: gitlab
+  MIRAGE_SCM_AUTH: token
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+.build_notify: &build_notify
+  image: golang:1.23
+  script:
+    - go build -o mirage-notify ./cmd/mirage-notify
+  artifacts:
+    paths: [mirage-notify]
+    expire_in: 1 hour
+
+build-image:
+  stage: build
+  image: docker:27
+  services: [docker:27-dind]
+  rules:
+    - if: $CI_MERGE_REQUEST_IID
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - docker build -t "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA" .
+    - docker push "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA"
+    - DIGEST=$(docker buildx imagetools inspect "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA" --format '{{.Manifest.Digest}}' 2>/dev/null || true)
+    - |
+      if [ -z "$DIGEST" ]; then
+        DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_NAME:$CI_COMMIT_SHORT_SHA" | awk -F@ '{print $2}')
+      fi
+    - echo "IMAGE_REF=${IMAGE_NAME}@${DIGEST}" > build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+
+notify-build:
+  <<: *build_notify
+  stage: build
+  rules:
+    - if: $CI_MERGE_REQUEST_IID
+  needs: [build-image]
+  script:
+    - go build -o mirage-notify ./cmd/mirage-notify
+    - export MIRAGE_SCM_TOKEN="${MIRAGE_SCM_TOKEN:-$CI_JOB_TOKEN}"
+    - export MIRAGE_SCM_PROJECT_ID="${CI_PROJECT_PATH}"
+    - export MIRAGE_SCM_SHA="$CI_COMMIT_SHA"
+    - export MIRAGE_SCM_PR="$CI_MERGE_REQUEST_IID"
+    - ./mirage-notify status --state pending --description "Deploying Mirage preview"
+
+deploy-preview:
+  stage: preview
+  image: bitnami/kubectl:latest
+  rules:
+    - if: $CI_MERGE_REQUEST_IID
+  needs: [build-image, notify-build]
+  script:
+    - |
+      if [ -z "${KUBE_CONFIG:-}" ]; then
+        echo "KUBE_CONFIG not set — skipping cluster apply (status will stay pending)."
+        exit 0
+      fi
+    - echo "$KUBE_CONFIG" | base64 -d > /tmp/kubeconfig && export KUBECONFIG=/tmp/kubeconfig
+    - PE_NAME="mr-${CI_MERGE_REQUEST_IID}"
+    - TARGET_NAMESPACE="preview-mr-${CI_MERGE_REQUEST_IID}"
+    - |
+      cat > /tmp/pe.yaml <<EOF
+      apiVersion: mirage.dev/v1alpha1
+      kind: PreviewEnvironment
+      metadata:
+        name: ${PE_NAME}
+        namespace: ${PE_NAMESPACE}
+      spec:
+        image: ${IMAGE_REF}
+        targetNamespace: ${TARGET_NAMESPACE}
+        ttlSeconds: 86400
+        containerPort: 8080
+        backend: direct
+        source:
+          provider: gitlab
+          repo: ${CI_PROJECT_URL}
+          pullRequest: ${CI_MERGE_REQUEST_IID}
+          commitSHA: ${CI_COMMIT_SHA}
+          projectID: ${CI_PROJECT_PATH}
+      EOF
+    - sed -i 's/^      //' /tmp/pe.yaml
+    - kubectl apply -f /tmp/pe.yaml
+    - |
+      for i in $(seq 1 60); do
+        PHASE=$(kubectl -n "$PE_NAMESPACE" get pe "$PE_NAME" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+        URL=$(kubectl -n "$PE_NAMESPACE" get pe "$PE_NAME" -o jsonpath='{.status.url}' 2>/dev/null || true)
+        echo "phase=$PHASE url=$URL"
+        [ "$PHASE" = "Ready" ] && break
+        [ "$PHASE" = "Failed" ] && break
+        sleep 10
+      done
+    - echo "PHASE=${PHASE:-unknown}" >> deploy.env
+    - echo "URL=${URL:-}" >> deploy.env
+    - echo "PE_NAME=${PE_NAME}" >> deploy.env
+    - echo "TARGET_NAMESPACE=${TARGET_NAMESPACE}" >> deploy.env
+  artifacts:
+    reports:
+      dotenv: deploy.env
+
+report-preview:
+  stage: preview
+  image: golang:1.23
+  rules:
+    - if: $CI_MERGE_REQUEST_IID
+  needs: [deploy-preview, build-image]
+  script:
+    - go build -o mirage-notify ./cmd/mirage-notify
+    - export MIRAGE_SCM_TOKEN="${MIRAGE_SCM_TOKEN:-$CI_JOB_TOKEN}"
+    - export MIRAGE_SCM_PROJECT_ID="${CI_PROJECT_PATH}"
+    - export MIRAGE_SCM_SHA="$CI_COMMIT_SHA"
+    - export MIRAGE_SCM_PR="$CI_MERGE_REQUEST_IID"
+    - |
+      if [ "${PHASE:-}" = "Ready" ]; then
+        ./mirage-notify status --state success --target-url "${URL}" --description "Preview ready"
+        ./mirage-notify comment --phase Ready --url "${URL}" --image "${IMAGE_REF}" --namespace "${TARGET_NAMESPACE}"
+      else
+        ./mirage-notify status --state failure --description "Preview ${PHASE:-unknown}"
+        ./mirage-notify comment --phase "${PHASE:-Failed}" --url "${URL}" --image "${IMAGE_REF}" --namespace "${TARGET_NAMESPACE}"
+      fi
+
+cleanup-preview:
+  stage: cleanup
+  image: bitnami/kubectl:latest
+  rules:
+    - if: $CI_MERGE_REQUEST_IID
+      when: manual
+  script:
+    - |
+      if [ -z "${KUBE_CONFIG:-}" ]; then echo "no kube"; exit 0; fi
+      echo "$KUBE_CONFIG" | base64 -d > /tmp/kubeconfig && export KUBECONFIG=/tmp/kubeconfig
+      kubectl -n "$PE_NAMESPACE" delete pe "mr-${CI_MERGE_REQUEST_IID}" --ignore-not-found

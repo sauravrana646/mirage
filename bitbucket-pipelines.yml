@@ -1,0 +1,100 @@
+# Bitbucket Pipelines — build digest, upsert PreviewEnvironment, report status/comments.
+# Repository variables:
+#   KUBE_CONFIG            — base64 kubeconfig (optional; skip apply if unset)
+#   BITBUCKET_TOKEN        — workspace/repo access token with PR + status scopes
+#   PREVIEW_INGRESS_HOST   — optional
+#
+# Enable Pipelines in repo settings. For OIDC/SSO-brokered tokens, set
+# MIRAGE_SCM_AUTH=oidc and MIRAGE_OIDC_TOKEN from your broker step.
+
+image: atlassian/default-image:4
+
+definitions:
+  steps:
+    - step: &preview
+        name: Mirage preview
+        image: golang:1.23
+        services:
+          - docker
+        caches:
+          - docker
+        script:
+          - export MIRAGE_SCM_PROVIDER=bitbucket
+          - export MIRAGE_SCM_AUTH=token
+          - export MIRAGE_SCM_WORKSPACE=$BITBUCKET_WORKSPACE
+          - export MIRAGE_SCM_REPO=$BITBUCKET_REPO_SLUG
+          - export MIRAGE_SCM_SHA=$BITBUCKET_COMMIT
+          - export MIRAGE_SCM_PR=${BITBUCKET_PR_ID:-0}
+          - export MIRAGE_SCM_TOKEN=${BITBUCKET_TOKEN:-$MIRAGE_SCM_TOKEN}
+          - go build -o mirage-notify ./cmd/mirage-notify
+          - |
+            if [ -z "${BITBUCKET_PR_ID:-}" ]; then
+              echo "Not a PR build — skipping preview"
+              exit 0
+            fi
+          - ./mirage-notify status --state pending --description "Deploying Mirage preview"
+          - IMAGE_NAME="ghcr.io/${BITBUCKET_REPO_FULL_NAME}/preview"
+          - echo "$BITBUCKET_TOKEN" | docker login ghcr.io -u "$BITBUCKET_REPO_OWNER" --password-stdin || true
+          - docker build -t "$IMAGE_NAME:pr-$BITBUCKET_PR_ID" .
+          - docker push "$IMAGE_NAME:pr-$BITBUCKET_PR_ID" || echo "push skipped — set registry credentials"
+          - DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_NAME:pr-$BITBUCKET_PR_ID" 2>/dev/null | awk -F@ '{print $2}')
+          - IMAGE_REF="${IMAGE_NAME}@${DIGEST:-local}"
+          - |
+            if [ -z "${KUBE_CONFIG:-}" ]; then
+              ./mirage-notify status --state failure --description "KUBE_CONFIG not configured"
+              ./mirage-notify comment --phase Failed --image "$IMAGE_REF" --namespace "preview-pr-${BITBUCKET_PR_ID}"
+              exit 0
+            fi
+          - echo "$KUBE_CONFIG" | base64 -d > /tmp/kubeconfig
+          - export KUBECONFIG=/tmp/kubeconfig
+          - PE_NAME="pr-${BITBUCKET_PR_ID}"
+          - TARGET_NAMESPACE="preview-pr-${BITBUCKET_PR_ID}"
+          - |
+            cat > /tmp/pe.yaml <<EOF
+            apiVersion: mirage.dev/v1alpha1
+            kind: PreviewEnvironment
+            metadata:
+              name: ${PE_NAME}
+              namespace: mirage-system
+            spec:
+              image: ${IMAGE_REF}
+              targetNamespace: ${TARGET_NAMESPACE}
+              ttlSeconds: 86400
+              containerPort: 8080
+              backend: direct
+              source:
+                provider: bitbucket
+                repo: https://bitbucket.org/${BITBUCKET_REPO_FULL_NAME}
+                pullRequest: ${BITBUCKET_PR_ID}
+                commitSHA: ${BITBUCKET_COMMIT}
+                workspace: ${BITBUCKET_WORKSPACE}
+                repoSlug: ${BITBUCKET_REPO_SLUG}
+            EOF
+          - sed -i 's/^            //' /tmp/pe.yaml
+          - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          - chmod +x kubectl && mv kubectl /usr/local/bin/
+          - kubectl apply -f /tmp/pe.yaml
+          - |
+            PHASE=Pending
+            URL=
+            for i in $(seq 1 60); do
+              PHASE=$(kubectl -n mirage-system get pe "$PE_NAME" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+              URL=$(kubectl -n mirage-system get pe "$PE_NAME" -o jsonpath='{.status.url}' 2>/dev/null || true)
+              echo "phase=$PHASE"
+              [ "$PHASE" = "Ready" ] && break
+              [ "$PHASE" = "Failed" ] && break
+              sleep 10
+            done
+          - |
+            if [ "$PHASE" = "Ready" ]; then
+              ./mirage-notify status --state success --target-url "$URL" --description "Preview ready"
+              ./mirage-notify comment --phase Ready --url "$URL" --image "$IMAGE_REF" --namespace "$TARGET_NAMESPACE"
+            else
+              ./mirage-notify status --state failure --description "Preview ${PHASE}"
+              ./mirage-notify comment --phase "$PHASE" --url "$URL" --image "$IMAGE_REF" --namespace "$TARGET_NAMESPACE"
+            fi
+
+pipelines:
+  pull-requests:
+    '**':
+      - step: *preview

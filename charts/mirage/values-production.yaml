@@ -1,0 +1,40 @@
+# Hardened defaults for shared / production clusters.
+# Usage:
+#   helm upgrade --install mirage charts/mirage -n mirage-system --create-namespace \
+#     -f charts/mirage/values.yaml -f charts/mirage/values-production.yaml \
+#     --set image.digest=sha256:... \
+#     --set policy.allowedRegistries=ghcr.io/your-org/ \
+#     --set policy.ingressHostSuffix=.preview.example.com
+
+replicaCount: 2
+
+webhook:
+  enabled: true
+  failurePolicy: Fail
+  certManager:
+    enabled: true
+
+policy:
+  requireDigest: true
+  # Override per install: comma-separated image prefixes.
+  allowedRegistries: ""
+  # Override per install: e.g. .preview.example.com
+  ingressHostSuffix: ""
+  defaultTTLSeconds: 86400
+  maxTTLSeconds: 604800
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+  networkPolicy:
+    enabled: true
+
+argoCD:
+  rbac:
+    # Enable only when using backend=argocd with a locked-down Argo project.
+    enabled: false

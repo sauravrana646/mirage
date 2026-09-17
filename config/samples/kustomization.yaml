@@ -1,0 +1,6 @@
+## Append samples of your project ##
+resources:
+- mirage_v1alpha1_previewenvironment.yaml
+- previewenvironment_production.yaml
+- previewenvironment_argocd.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

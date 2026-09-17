@@ -1,0 +1,92 @@
+# Full-featured PreviewEnvironment sample for production-style previews.
+# Prefer image digests from CI (see .github/workflows/preview.yml).
+apiVersion: mirage.dev/v1alpha1
+kind: PreviewEnvironment
+metadata:
+  name: pr-42
+  namespace: mirage-system
+  labels:
+    app.kubernetes.io/name: mirage
+    app.kubernetes.io/managed-by: mirage-ci
+    mirage.dev/pr: "42"
+  # Optional AI advisory annotation (written by external job, ignored by reconcile):
+  # annotations:
+  #   mirage.dev/ai-summary: "ImagePullBackOff on ghcr.io/... — check registry auth"
+spec:
+  source:
+    provider: github
+    repo: https://github.com/example/app
+    pullRequest: 42
+    commitSHA: 0123456789abcdef0123456789abcdef01234567
+    branch: feature/preview
+
+  # Prefer digest over mutable tags in production CI.
+  image: ghcr.io/example/app/preview@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  requireDigest: true
+  imagePullPolicy: IfNotPresent
+
+  targetNamespace: preview-pr-42
+  ttlSeconds: 86400
+  containerPort: 8080
+  replicas: 1
+  backend: direct
+  networkPolicy: baseline
+
+  env:
+    - name: APP_ENV
+      value: preview
+    # Prefer Secrets via envFrom / valueFrom — never commit credentials.
+    # - name: DATABASE_URL
+    #   valueFrom:
+    #     secretKeyRef:
+    #       name: preview-pr-42-secrets
+    #       key: database-url
+
+  # envFrom:
+  #   - secretRef:
+  #       name: preview-pr-42-secrets
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+
+  readinessProbe:
+    path: /healthz
+    port: 8080
+    initialDelaySeconds: 3
+    periodSeconds: 5
+  livenessProbe:
+    path: /healthz
+    port: 8080
+    initialDelaySeconds: 10
+    periodSeconds: 10
+
+  workloadLabels:
+    team: platform
+  workloadAnnotations:
+    mirage.dev/preview: "true"
+
+  # Optional scheduling (shared clusters):
+  # nodeSelector:
+  #   node-role.kubernetes.io/preview: ""
+  # tolerations:
+  #   - key: preview
+  #     operator: Exists
+  #     effect: NoSchedule
+  # priorityClassName: preview-low
+  # terminationGracePeriodSeconds: 30
+
+  ingress:
+    enabled: true
+    host: pr-42.preview.example.com
+    path: /
+    ingressClassName: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    tls:
+      enabled: true
+      secretName: pr-42-preview-tls

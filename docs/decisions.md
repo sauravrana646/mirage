@@ -19,6 +19,102 @@ Template:
 
 ---
 
+## 2026-09-17 — API group served as mirage.dev
+
+**Status:** Accepted
+
+**Context:** Kubebuilder defaulted to `mirage.mirage.dev` (group + domain). Docs and PRD use `mirage.dev/v1alpha1`.
+
+**Decision:** Override `+groupName` / GroupVersion to **`mirage.dev`**.
+
+**Consequences:** CRD file is `mirage.dev_previewenvironments.yaml`; samples use `apiVersion: mirage.dev/v1alpha1`.
+
+---
+
+## 2026-09-17 — No cross-namespace ownerReferences
+
+**Status:** Accepted
+
+**Context:** Namespaced CRs cannot owner-reference objects in another namespace (or Namespaces).
+
+**Decision:** Label workloads/namespaces with `mirage.dev/owner-uid`; cleanup deletes the owned `targetNamespace` via finalizer. Do not call `SetControllerReference` across namespaces.
+
+**Consequences:** GC will not cascade from CR deletion alone — finalizer is mandatory. Matches earlier ownership ADR.
+
+---
+
+## 2026-09-17 — Production feature set
+
+**Status:** Accepted
+
+**Context:** Move beyond MVP to shared-cluster usable operator.
+
+**Decision:** Ship validating webhook policies, Helm chart (HA + PDB + topology spread), GitHub preview Action, release workflow, Argo CD backend via unstructured Applications, AI advisory side path, suspend, probes, TLS ingress, NetworkPolicy modes, Prometheus metrics, Events, scheduling fields (nodeSelector/tolerations/affinity), default/max TTL env policy, Progressing/Expired conditions.
+
+**Consequences:** Larger surface area; webhook requires cert-manager (or Helm-generated certs) for cluster installs; Argo backend needs Argo CD CRDs present.
+
+---
+
+## 2026-09-17 — Cross-namespace ownership via labels
+
+**Status:** Accepted
+
+**Context:** Preview workloads live in `targetNamespace`; the CR lives in a management namespace. Kubernetes forbids cross-namespace ownerReferences.
+
+**Decision:** Label children with `mirage.dev/owner-*` and watch Deployments/Services/Ingresses; finalizer owns Namespace lifecycle. Do not attempt ownerRef from CR to children.
+
+**Consequences:** GC is reconcile-driven, not kube-controller-manager ownerRef GC.
+
+---
+
+## 2026-09-17 — Multi-SCM status reporting
+
+**Status:** Accepted
+
+**Context:** Teams need preview status and URLs on GitHub, GitLab, and Bitbucket PRs/MRs, with optional SSO/OIDC-brokered tokens.
+
+**Decision:** Ship `internal/scm` + `mirage-notify` CLI used from CI templates (GitHub Actions, GitLab CI, Bitbucket Pipelines). Support `auth=token|oidc`. Expand `spec.source` with `provider`, `projectID`, `workspace`, `repoSlug`. Never call SCM from reconcile.
+
+**Consequences:** Each platform needs a token (or OIDC-minted bearer) with status + comment scopes; cluster apply remains separate (kubeconfig or OIDC→IAM).
+
+---
+
+## 2026-09-17 — Security hardening after review
+
+**Status:** Accepted
+
+**Context:** Security/bugbot reviews found AI `workflow_run` checkout of PR SHA with secrets, unconstrained Argo destinations, and open NetworkPolicy ingress.
+
+**Decision:** AI advisory always checks out the default branch and skips fork `workflow_run`; Argo destination forced to `targetNamespace`; baseline NP requires `mirage.dev/ingress-access=true`; deny nginx snippet annotations; ship `values-production.yaml`.
+
+**Consequences:** Operators must label ingress namespaces; demos may use `networkPolicy: permissive`.
+
+---
+
+## 2026-09-17 — Immutable targetNamespace
+
+**Status:** Accepted
+
+**Context:** Changing `spec.targetNamespace` after create provisioned a new env but left the old namespace running (orphan leak).
+
+**Decision:** Mark `targetNamespace` **immutable** via CRD CEL (`XValidation`).
+
+**Consequences:** Callers must delete/recreate the CR to move namespaces; cleanup always matches the single owned namespace.
+
+---
+
+## 2026-09-17 — Preview isolation defaults
+
+**Status:** Accepted
+
+**Context:** Security review: untrusted PR images need PSA, network, and identity baselines before shared-cluster demos.
+
+**Decision:** Preview namespaces get PSA `restricted` labels, ResourceQuota/LimitRange, baseline NetworkPolicy (DNS egress + app-port ingress), restricted container securityContext, and `automountServiceAccountToken: false`. Cap `replicas` at 5.
+
+**Consequences:** Images must run as non-root (sample uses nginx-unprivileged). Apps needing broader egress need a future escape hatch.
+
+---
+
 ## 2026-08-25 — Default ingress: nginx + nip.io on kind
 
 **Status:** Accepted (Phase 3)

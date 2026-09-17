@@ -1,0 +1,68 @@
+# Example / reference workflow snippet.
+# Production copy: .github/workflows/preview.yml (digest push, Ready wait, PR comment).
+# Requires secrets: KUBE_CONFIG (base64 kubeconfig limited to mirage-ci SA) and
+# GHCR permissions for packages:write. Adjust image registry as needed.
+name: preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: write
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    if: github.event.action != 'closed'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        id: image
+        run: |
+          IMAGE=ghcr.io/${{ github.repository }}/preview:pr-${{ github.event.pull_request.number }}
+          docker build -t "$IMAGE" .
+          dig=$(docker push "$IMAGE" | tee /dev/stderr | awk '/digest:/{print $3}')
+          echo "ref=${IMAGE%@*}@$dig" >> "$GITHUB_OUTPUT"
+      - name: Apply PreviewEnvironment
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          echo "$KUBECONFIG_B64" | base64 -d > kubeconfig
+          export KUBECONFIG=$PWD/kubeconfig
+          kubectl apply -f - <<EOF
+          apiVersion: mirage.dev/v1alpha1
+          kind: PreviewEnvironment
+          metadata:
+            name: pr-${{ github.event.pull_request.number }}
+            namespace: mirage-system
+          spec:
+            image: ${{ steps.image.outputs.ref }}
+            targetNamespace: preview-pr-${{ github.event.pull_request.number }}
+            ttlSeconds: 86400
+            containerPort: 80
+            source:
+              repo: ${{ github.repository }}
+              pullRequest: ${{ github.event.pull_request.number }}
+              commitSHA: ${{ github.event.pull_request.head.sha }}
+          EOF
+
+  cleanup:
+    runs-on: ubuntu-latest
+    if: github.event.action == 'closed'
+    steps:
+      - name: Delete PreviewEnvironment
+        env:
+          KUBECONFIG_B64: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          echo "$KUBECONFIG_B64" | base64 -d > kubeconfig
+          export KUBECONFIG=$PWD/kubeconfig
+          kubectl -n mirage-system delete previewenvironment pr-${{ github.event.pull_request.number }} --ignore-not-found

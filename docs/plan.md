@@ -2,6 +2,8 @@
 
 Follow phases in order. Do not skip the “done when” checks. After each phase, append any design choices to [decisions.md](./decisions.md).
 
+**Production status (2026-09-17):** Phases 1–7 implemented in-tree (Helm, webhook, GitHub Action, Argo backend, AI side path). Phase 8 is demo/contribution polish.
+
 Locked defaults (see decisions): **Namespaced** CR, **finalizer-managed** `targetNamespace`, **`ttlSeconds` only**, nginx + nip.io for Phase 3 URLs.
 
 ---
@@ -40,8 +42,8 @@ Locked defaults (see decisions): **Namespaced** CR, **finalizer-managed** `targe
 - Kubebuilder layout, code generation, manager main  
 
 ### Done when
-- [ ] CRD installed; `kubectl get previewenvironments -n mirage-system` works  
-- [ ] Manager pod Running (or `make run` against kind)  
+- [x] CRD installed; `kubectl get previewenvironments -n mirage-system` works  
+- [x] Manager pod Running (or `make run` against kind)  
 
 ---
 
@@ -80,10 +82,10 @@ Split into **2a** (create path) and **2b** (delete + failure) if velocity drops 
 - Idempotent create/update, finalizers, conditions, ownerRefs, requeue  
 
 ### Done when
-- [ ] `kubectl apply -f config/samples/...` → pods Ready; status Ready  
-- [ ] `kubectl delete` CR → target namespace and children gone  
-- [ ] Conflict / pull failure sets Failed (or Ready=False) meaningfully  
-- [ ] envtest covers create + delete (and one failure if practical)  
+- [x] `kubectl apply -f config/samples/...` → pods Ready; status Ready  
+- [x] `kubectl delete` CR → target namespace and children gone  
+- [x] Conflict / pull failure sets Failed (or Ready=False) meaningfully  
+- [x] envtest covers create + delete (and one failure if practical)  
 
 ---
 
@@ -111,8 +113,8 @@ Split into **2a** (create path) and **2b** (delete + failure) if velocity drops 
 - Ingress, time-based reconcile (`RequeueAfter`), Events API  
 
 ### Done when
-- [ ] Status includes a URL reachable via the documented kind ingress setup  
-- [ ] Expired preview is fully cleaned up (namespace + CR gone) without manual delete  
+- [x] Status includes a URL reachable via the documented kind ingress setup  
+- [x] Expired preview is fully cleaned up (namespace + CR gone) without manual delete  
 
 ---
 
@@ -140,10 +142,10 @@ Phase 4 cannot succeed without a digests-on-PR build. Before wiring CR apply:
 - CI → cluster auth (kubeconfig / OIDC later), GitHub Checks/comments  
 
 ### Done when
-- [ ] Open PR → image built → preview appears  
-- [ ] Close PR → preview gone  
-- [ ] Push to PR → preview updates (new image digest)  
-- [ ] CI uses documented non-admin RBAC  
+- [x] Open PR → image built → preview appears  
+- [x] Close PR → preview gone  
+- [x] Push to PR → preview updates (new image digest)  
+- [x] CI uses documented non-admin RBAC  
 
 ---
 
@@ -151,7 +153,7 @@ Phase 4 cannot succeed without a digests-on-PR build. Before wiring CR apply:
 
 **Goal:** Safer defaults for shared clusters.
 
-> **Note:** Minimal ResourceQuota + LimitRange per preview namespace should land as soon as demos leave a single-user kind cluster — ideally by end of Phase 3 if sharing early. Phase 5 makes them default and adds NetworkPolicy + packaging.
+> **Note:** Default ResourceQuota + LimitRange are created per preview namespace starting in the MVP controller (early Phase 5). NetworkPolicy remains Phase 5 optional.
 
 ### Steps
 1. Default ResourceQuota + LimitRange per preview namespace (aligns with PRD F9; treat as **P1** once shared).
@@ -164,9 +166,9 @@ Phase 4 cannot succeed without a digests-on-PR build. Before wiring CR apply:
 - Multi-tenant baselines, operator packaging, CI for controllers  
 
 ### Done when
-- [ ] Chart installs Mirage cleanly  
-- [ ] New previews get quota/limit defaults  
-- [ ] CI runs unit tests; optional kind job  
+- [x] Chart installs Mirage cleanly  
+- [x] New previews get quota/limit defaults  
+- [x] CI runs unit tests; optional kind job  
 
 ---
 
@@ -184,8 +186,8 @@ Phase 4 cannot succeed without a digests-on-PR build. Before wiring CR apply:
 - Argo Application API, sync status vs Mirage conditions  
 
 ### Done when
-- [ ] Same sample app deployable via Argo backend  
-- [ ] Cleanup still works  
+- [x] Same sample app deployable via Argo backend  
+- [x] Cleanup still works  
 
 ---
 
@@ -200,7 +202,7 @@ Phase 4 cannot succeed without a digests-on-PR build. Before wiring CR apply:
 4. Never block reconcile on LLM availability.
 
 ### Done when
-- [ ] Failed preview gets a useful PR comment without controller changes that call an LLM  
+- [x] Failed preview gets a useful PR comment without controller changes that call an LLM  
 
 ---
 
@@ -215,7 +217,7 @@ Phase 4 cannot succeed without a digests-on-PR build. Before wiring CR apply:
 4. Keep decisions.md honest — include mistakes.
 
 ### Done when
-- [ ] Repo is demoable by a stranger from README alone  
+- [x] Repo is demoable by a stranger from README alone  
 - [ ] (Aspirational, not a blocker) At least one upstream PR opened (even docs/tests)  
 
 ---

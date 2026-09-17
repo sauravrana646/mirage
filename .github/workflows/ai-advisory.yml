@@ -1,0 +1,112 @@
+# AI advisory side-path: summarize Failed / failed-wait PreviewEnvironments.
+# Does NOT run inside the reconcile loop — see ai/README.md.
+#
+# Triggers:
+#   - workflow_run: after "preview" concludes with failure
+#   - workflow_dispatch: manual with PR number
+name: ai-advisory
+
+on:
+  workflow_run:
+    workflows: [preview]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number (PreviewEnvironment name is pr-<N>)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+jobs:
+  summarize:
+    name: Summarize preview failure
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'failure' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Always use the default branch for scripts — never PR head (secrets present).
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Resolve PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PR="${{ inputs.pr_number }}"
+          else
+            # Prefer pull_requests from the workflow_run payload
+            PR='${{ github.event.workflow_run.pull_requests[0].number }}'
+            if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+              HEAD_BRANCH="${{ github.event.workflow_run.head_branch }}"
+              PR=$(gh pr list --repo "${{ github.repository }}" --head "$HEAD_BRANCH" --state all \
+                --json number --jq '.[0].number' || true)
+            fi
+          fi
+          if [ -z "$PR" ] || [ "$PR" = "null" ]; then
+            echo "Could not resolve PR number" >&2
+            exit 1
+          fi
+          echo "number=${PR}" >> "$GITHUB_OUTPUT"
+          echo "pe_name=pr-${PR}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure kubectl
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+        run: |
+          if [ -z "$KUBE_CONFIG" ]; then
+            echo "secrets.KUBE_CONFIG is required (base64-encoded kubeconfig)" >&2
+            exit 1
+          fi
+          echo "$KUBE_CONFIG" | base64 -d > "${RUNNER_TEMP}/kubeconfig"
+          echo "KUBECONFIG=${RUNNER_TEMP}/kubeconfig" >> "$GITHUB_ENV"
+          chmod 600 "${RUNNER_TEMP}/kubeconfig"
+
+      - name: Gather and summarize
+        id: summary
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          PE_NAME: ${{ steps.pr.outputs.pe_name }}
+          PE_NAMESPACE: mirage-system
+        run: |
+          set -euo pipefail
+          chmod +x ai/summarize.sh
+          SUMMARY_FILE="${RUNNER_TEMP}/ai-summary.md"
+          ./ai/summarize.sh --name "$PE_NAME" --namespace "$PE_NAMESPACE" --out "$SUMMARY_FILE"
+          {
+            echo "body<<EOF_SUMMARY"
+            cat "$SUMMARY_FILE"
+            echo "EOF_SUMMARY"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Comment on PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ steps.pr.outputs.number }}
+          BODY: ${{ steps.summary.outputs.body }}
+        run: |
+          set -euo pipefail
+          MARKER='<!-- mirage-ai-advisory -->'
+          FULL=$(printf '%s\n### Mirage AI advisory\n\n%s\n' "$MARKER" "$BODY")
+          EXISTING=$(gh api "repos/${{ github.repository }}/issues/${PR}/comments" \
+            --paginate --jq ".[] | select(.body | contains(\"${MARKER}\")) | .id" | head -n1 || true)
+          if [ -n "$EXISTING" ]; then
+            gh api --method PATCH "repos/${{ github.repository }}/issues/comments/${EXISTING}" \
+              -f body="$FULL"
+          else
+            gh api --method POST "repos/${{ github.repository }}/issues/${PR}/comments" \
+              -f body="$FULL"
+          fi
