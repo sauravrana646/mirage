@@ -228,13 +228,18 @@ func PreviewCommentBody(marker, phase, url, image, namespace string) string {
 	if marker == "" {
 		marker = defaultCommentMarker
 	}
-	if phase == "Ready" || phase == "success" {
+	switch phase {
+	case "Ready", "success":
 		if url == "" {
 			url = "_(ingress not configured)_"
 		}
 		return fmt.Sprintf("%s\n### Mirage preview\n\n| | |\n|---|---|\n| **Status** | Ready |\n| **URL** | %s |\n| **Image** | `%s` |\n| **Namespace** | `%s` |\n",
 			marker, url, image, namespace)
+	case "Built", "Skipped":
+		return fmt.Sprintf("%s\n### Mirage preview\n\n| | |\n|---|---|\n| **Status** | Image built (cluster apply skipped) |\n| **Image** | `%s` |\n| **Namespace** | `%s` |\n\n_Set `KUBE_CONFIG` (or OIDC→kube) to deploy the PreviewEnvironment._\n",
+			marker, image, namespace)
+	default:
+		return fmt.Sprintf("%s\n### Mirage preview\n\nPreview did not become Ready (phase: `%s`).\n\nImage: `%s`\nNamespace: `%s`\n",
+			marker, phase, image, namespace)
 	}
-	return fmt.Sprintf("%s\n### Mirage preview\n\nPreview did not become Ready (phase: `%s`).\n\nImage: `%s`\nNamespace: `%s`\n",
-		marker, phase, image, namespace)
 }

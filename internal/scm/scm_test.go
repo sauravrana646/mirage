@@ -125,4 +125,11 @@ func TestPreviewCommentBody(t *testing.T) {
 			t.Fatalf("missing %q in %s", part, s)
 		}
 	}
+	built := PreviewCommentBody("", "Built", "", "img@sha", "preview-pr-2")
+	if strings.Contains(built, "did not become Ready") {
+		t.Fatalf("Built phase should not look like a failure: %s", built)
+	}
+	if !strings.Contains(built, "cluster apply skipped") {
+		t.Fatalf("expected skip messaging: %s", built)
+	}
 }

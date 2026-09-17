@@ -191,9 +191,7 @@ jobs:
           set -euo pipefail
           if [ "${KUBE_SKIP:-}" = "true" ]; then
             ./bin/mirage-notify status --state success --description "Image built (cluster apply skipped — no KUBE_CONFIG)"
-            ./bin/mirage-notify comment --phase "Built" --image "${IMAGE_REF}" --namespace "$TARGET_NAMESPACE" \
-              --url "" || true
-            # Override comment body for skip case
+            ./bin/mirage-notify comment --phase Built --image "${IMAGE_REF}" --namespace "$TARGET_NAMESPACE"
             exit 0
           fi
           if [ "${WAIT_OUTCOME:-}" = "success" ]; then
