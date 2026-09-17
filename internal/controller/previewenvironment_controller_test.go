@@ -64,9 +64,9 @@ var _ = Describe("PreviewEnvironment Controller", func() {
 					Namespace: "default",
 				},
 				Spec: miragev1alpha1.PreviewEnvironmentSpec{
-					Image:           "nginx:1.27-alpine",
+					Image:           "nginxinc/nginx-unprivileged:1.27-alpine",
 					TargetNamespace: targetNS,
-					ContainerPort:   80,
+					ContainerPort:   8080,
 					Replicas:        int32Ptr(1),
 				},
 			}
@@ -109,10 +109,15 @@ var _ = Describe("PreviewEnvironment Controller", func() {
 
 			deploy := &appsv1.Deployment{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: targetNS}, deploy)).To(Succeed())
-			Expect(deploy.Spec.Template.Spec.Containers[0].Image).To(Equal("nginx:1.27-alpine"))
+			Expect(deploy.Spec.Template.Spec.Containers[0].Image).To(Equal("nginxinc/nginx-unprivileged:1.27-alpine"))
 
 			svc := &corev1.Service{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: targetNS}, svc)).To(Succeed())
+
+			quota := &corev1.ResourceQuota{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "mirage-quota", Namespace: targetNS}, quota)).To(Succeed())
+			lr := &corev1.LimitRange{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "mirage-defaults", Namespace: targetNS}, lr)).To(Succeed())
 
 			By("simulating Deployment available")
 			deploy.Status.Replicas = 1
@@ -177,10 +182,10 @@ var _ = Describe("PreviewEnvironment Controller", func() {
 			pe := &miragev1alpha1.PreviewEnvironment{
 				ObjectMeta: metav1.ObjectMeta{Name: name.Name, Namespace: name.Namespace},
 				Spec: miragev1alpha1.PreviewEnvironmentSpec{
-					Image:           "nginx:1.27-alpine",
+					Image:           "nginxinc/nginx-unprivileged:1.27-alpine",
 					TargetNamespace: targetNS,
 					TTLSeconds:      &ttl,
-					ContainerPort:   80,
+					ContainerPort:   8080,
 				},
 			}
 			Expect(k8sClient.Create(ctx, pe)).To(Succeed())

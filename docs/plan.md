@@ -151,7 +151,7 @@ Phase 4 cannot succeed without a digests-on-PR build. Before wiring CR apply:
 
 **Goal:** Safer defaults for shared clusters.
 
-> **Note:** Minimal ResourceQuota + LimitRange per preview namespace should land as soon as demos leave a single-user kind cluster — ideally by end of Phase 3 if sharing early. Phase 5 makes them default and adds NetworkPolicy + packaging.
+> **Note:** Default ResourceQuota + LimitRange are created per preview namespace starting in the MVP controller (early Phase 5). NetworkPolicy remains Phase 5 optional.
 
 ### Steps
 1. Default ResourceQuota + LimitRange per preview namespace (aligns with PRD F9; treat as **P1** once shared).

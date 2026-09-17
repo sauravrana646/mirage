@@ -50,6 +50,7 @@ const (
 	ReasonWorkloadReady     = "WorkloadReady"
 	ReasonNamespaceConflict = "NamespaceConflict"
 	ReasonImageInvalid      = "ImageInvalid"
+	ReasonInvalidSpec       = "InvalidSpec"
 	ReasonRolloutFailed     = "RolloutFailed"
 	ReasonReconciling       = "Reconciling"
 	ReasonExpiring          = "Expiring"

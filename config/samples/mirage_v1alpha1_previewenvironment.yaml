@@ -7,9 +7,9 @@ metadata:
   name: preview-sample
   namespace: default
 spec:
-  image: nginx:1.27-alpine
+  image: nginxinc/nginx-unprivileged:1.27-alpine
   targetNamespace: preview-sample
-  containerPort: 80
+  containerPort: 8080
   replicas: 1
   ttlSeconds: 3600
   backend: direct

@@ -26,10 +26,12 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -63,6 +65,8 @@ type PreviewEnvironmentReconciler struct {
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=limitranges,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
@@ -96,7 +100,14 @@ func (r *PreviewEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 	if pe.Spec.TargetNamespace == "" {
 		if err := r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse,
-			miragev1alpha1.ReasonImageInvalid, "spec.targetNamespace is required", "", nil); err != nil {
+			miragev1alpha1.ReasonInvalidSpec, "spec.targetNamespace is required", "", nil); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+	if errs := validation.IsDNS1123Label(pe.Spec.TargetNamespace); len(errs) > 0 {
+		if err := r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse,
+			miragev1alpha1.ReasonInvalidSpec, fmt.Sprintf("invalid targetNamespace: %v", errs), "", nil); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -138,6 +149,17 @@ func (r *PreviewEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 		_ = r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse, reason, err.Error(), "", expiresAt)
 		return ctrl.Result{RequeueAfter: requeueFast}, nil
+	}
+
+	if err := r.ensureLimitRange(ctx, pe); err != nil {
+		_ = r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse,
+			miragev1alpha1.ReasonRolloutFailed, err.Error(), "", expiresAt)
+		return ctrl.Result{}, err
+	}
+	if err := r.ensureResourceQuota(ctx, pe); err != nil {
+		_ = r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse,
+			miragev1alpha1.ReasonRolloutFailed, err.Error(), "", expiresAt)
+		return ctrl.Result{}, err
 	}
 
 	deploy, err := r.ensureDeployment(ctx, pe)
@@ -288,6 +310,56 @@ func (r *PreviewEnvironmentReconciler) workloadLabels(pe *miragev1alpha1.Preview
 	}
 }
 
+func (r *PreviewEnvironmentReconciler) ensureLimitRange(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
+	lr := &corev1.LimitRange{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mirage-defaults",
+			Namespace: pe.Spec.TargetNamespace,
+		},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, lr, func() error {
+		lr.Labels = r.workloadLabels(pe)
+		lr.Spec.Limits = []corev1.LimitRangeItem{{
+			Type: corev1.LimitTypeContainer,
+			Default: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("100m"),
+				corev1.ResourceMemory: resource.MustParse("128Mi"),
+			},
+			DefaultRequest: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("50m"),
+				corev1.ResourceMemory: resource.MustParse("64Mi"),
+			},
+			Max: corev1.ResourceList{
+				corev1.ResourceCPU:    resource.MustParse("1"),
+				corev1.ResourceMemory: resource.MustParse("512Mi"),
+			},
+		}}
+		return nil
+	})
+	return err
+}
+
+func (r *PreviewEnvironmentReconciler) ensureResourceQuota(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
+	rq := &corev1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "mirage-quota",
+			Namespace: pe.Spec.TargetNamespace,
+		},
+	}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, rq, func() error {
+		rq.Labels = r.workloadLabels(pe)
+		rq.Spec.Hard = corev1.ResourceList{
+			corev1.ResourceRequestsCPU:    resource.MustParse("1"),
+			corev1.ResourceRequestsMemory: resource.MustParse("1Gi"),
+			corev1.ResourceLimitsCPU:      resource.MustParse("2"),
+			corev1.ResourceLimitsMemory:   resource.MustParse("2Gi"),
+			corev1.ResourcePods:           resource.MustParse("10"),
+		}
+		return nil
+	})
+	return err
+}
+
 func (r *PreviewEnvironmentReconciler) ensureDeployment(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) (*appsv1.Deployment, error) {
 	replicas := defaultReplicas
 	if pe.Spec.Replicas != nil {
@@ -322,7 +394,23 @@ func (r *PreviewEnvironmentReconciler) ensureDeployment(ctx context.Context, pe 
 				Name:          "http",
 				ContainerPort: port,
 			}},
+			SecurityContext: &corev1.SecurityContext{
+				AllowPrivilegeEscalation: boolPtr(false),
+				RunAsNonRoot:             boolPtr(true),
+				Capabilities: &corev1.Capabilities{
+					Drop: []corev1.Capability{"ALL"},
+				},
+				SeccompProfile: &corev1.SeccompProfile{
+					Type: corev1.SeccompProfileTypeRuntimeDefault,
+				},
+			},
 		}}
+		deploy.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
+			RunAsNonRoot: boolPtr(true),
+			SeccompProfile: &corev1.SeccompProfile{
+				Type: corev1.SeccompProfileTypeRuntimeDefault,
+			},
+		}
 		return nil
 	})
 	if err != nil {
@@ -333,6 +421,8 @@ func (r *PreviewEnvironmentReconciler) ensureDeployment(ctx context.Context, pe 
 	}
 	return deploy, nil
 }
+
+func boolPtr(v bool) *bool { return &v }
 
 func (r *PreviewEnvironmentReconciler) ensureService(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
 	port := pe.Spec.ContainerPort

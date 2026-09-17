@@ -56,6 +56,7 @@ Teams want per-PR previews without hand-maintained ApplicationSets, leftover nam
 | [Decisions](./docs/decisions.md) | Design decision log (append-only) |
 | [AI roadmap](./docs/ai-roadmap.md) | How AI plugs in later (not in reconcile) |
 | [Prior art](./docs/prior-art.md) | Related tools and how Mirage differs |
+| [kind Ingress](./docs/kind-ingress.md) | nginx + nip.io demo setup |
 
 ## Stack
 
