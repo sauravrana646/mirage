@@ -23,15 +23,13 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -48,17 +46,14 @@ const (
 	appLabel                   = "app.kubernetes.io/name"
 	componentLabel             = "app.kubernetes.io/component"
 	requeueFast                = 15 * time.Second
+	namespaceDeleteWait        = 5 * time.Second
 )
 
 // PreviewEnvironmentReconciler reconciles a PreviewEnvironment object.
-//
-// Ownership model (see docs/decisions.md): the CR is Namespaced and cannot
-// owner-reference a Namespace or workloads in another namespace. Cleanup is
-// done via a finalizer that deletes the labeled targetNamespace (cascading
-// children). Workloads are labeled with mirage.dev/owner-uid for conflict checks.
 type PreviewEnvironmentReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	Recorder record.EventRecorder
 }
 
 // +kubebuilder:rbac:groups=mirage.dev,resources=previewenvironments,verbs=get;list;watch;create;update;patch;delete
@@ -67,14 +62,17 @@ type PreviewEnvironmentReconciler struct {
 // +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=limitranges,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=argoproj.io,resources=applications,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
-// Reconcile moves cluster state toward the PreviewEnvironment spec.
 func (r *PreviewEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
 	pe := &miragev1alpha1.PreviewEnvironment{}
 	if err := r.Get(ctx, req.NamespacedName, pe); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -93,7 +91,19 @@ func (r *PreviewEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	if msg, reason := validateSpec(pe); msg != "" {
-		return ctrl.Result{}, r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse, reason, msg, "", nil)
+		r.record(pe, corev1.EventTypeWarning, reason, msg)
+		return ctrl.Result{}, r.patchStatus(ctx, pe, statusPatch{
+			Phase: miragev1alpha1.PhaseFailed, Ready: metav1.ConditionFalse, Reason: reason, Message: msg,
+		})
+	}
+
+	if pe.Spec.Suspend {
+		r.record(pe, corev1.EventTypeNormal, miragev1alpha1.ReasonPaused, "Preview suspended")
+		previewsPaused.Inc()
+		return ctrl.Result{}, r.patchStatus(ctx, pe, statusPatch{
+			Phase: miragev1alpha1.PhasePaused, Ready: metav1.ConditionFalse,
+			Reason: miragev1alpha1.ReasonPaused, Message: "spec.suspend=true",
+		})
 	}
 
 	expiresAt := computeExpiresAt(pe, time.Now())
@@ -101,6 +111,7 @@ func (r *PreviewEnvironmentReconciler) Reconcile(ctx context.Context, req ctrl.R
 		return ctrl.Result{}, err
 	}
 
+	logger.V(1).Info("reconciling preview", "targetNamespace", pe.Spec.TargetNamespace, "backend", pe.Spec.Backend)
 	return r.reconcileActive(ctx, pe, expiresAt)
 }
 
@@ -114,8 +125,8 @@ func validateSpec(pe *miragev1alpha1.PreviewEnvironment) (message, reason string
 	if errs := validation.IsDNS1123Label(pe.Spec.TargetNamespace); len(errs) > 0 {
 		return fmt.Sprintf("invalid targetNamespace: %v", errs), miragev1alpha1.ReasonInvalidSpec
 	}
-	if pe.Spec.Backend != "" && pe.Spec.Backend != "direct" {
-		return fmt.Sprintf("backend %q is not implemented yet", pe.Spec.Backend), miragev1alpha1.ReasonRolloutFailed
+	if pe.Spec.Backend != "" && pe.Spec.Backend != "direct" && pe.Spec.Backend != "argocd" {
+		return fmt.Sprintf("backend %q is not supported", pe.Spec.Backend), miragev1alpha1.ReasonInvalidSpec
 	}
 	return "", ""
 }
@@ -129,45 +140,58 @@ func computeExpiresAt(pe *miragev1alpha1.PreviewEnvironment, now time.Time) *met
 	return expiresAt
 }
 
-func (r *PreviewEnvironmentReconciler) handleExpiry(
-	ctx context.Context,
-	pe *miragev1alpha1.PreviewEnvironment,
-	expiresAt *metav1.Time,
-) (handled bool, err error) {
+func (r *PreviewEnvironmentReconciler) handleExpiry(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment, expiresAt *metav1.Time) (bool, error) {
 	if expiresAt == nil || expiresAt.After(time.Now()) {
 		return false, nil
 	}
 	log.FromContext(ctx).Info("TTL expired; cleaning up preview", "expiresAt", expiresAt.Time)
-	if err := r.patchStatus(ctx, pe, miragev1alpha1.PhaseExpiring, metav1.ConditionFalse,
-		miragev1alpha1.ReasonExpiring, "TTL elapsed; deleting preview", pe.Status.URL, expiresAt); err != nil {
-		return true, err
-	}
+	r.record(pe, corev1.EventTypeNormal, miragev1alpha1.ReasonExpiring, "TTL elapsed")
+	_ = r.patchStatus(ctx, pe, statusPatch{
+		Phase: miragev1alpha1.PhaseExpiring, Ready: metav1.ConditionFalse,
+		Reason: miragev1alpha1.ReasonExpiring, Message: "TTL elapsed; deleting preview",
+		URL: pe.Status.URL, ExpiresAt: expiresAt,
+	})
 	if err := r.cleanupTarget(ctx, pe); err != nil {
 		return true, err
 	}
+	previewsExpired.Inc()
 	if err := r.Delete(ctx, pe); err != nil && !apierrors.IsNotFound(err) {
 		return true, err
 	}
 	return true, nil
 }
 
-func (r *PreviewEnvironmentReconciler) reconcileActive(
-	ctx context.Context,
-	pe *miragev1alpha1.PreviewEnvironment,
-	expiresAt *metav1.Time,
-) (ctrl.Result, error) {
+func (r *PreviewEnvironmentReconciler) reconcileActive(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment, expiresAt *metav1.Time) (ctrl.Result, error) {
 	if err := r.ensureNamespace(ctx, pe); err != nil {
 		reason := miragev1alpha1.ReasonRolloutFailed
 		if isNamespaceConflict(err) {
 			reason = miragev1alpha1.ReasonNamespaceConflict
 		}
-		_ = r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse, reason, err.Error(), "", expiresAt)
+		r.record(pe, corev1.EventTypeWarning, reason, err.Error())
+		_ = r.patchStatus(ctx, pe, statusPatch{
+			Phase: miragev1alpha1.PhaseFailed, Ready: metav1.ConditionFalse, Reason: reason, Message: err.Error(), ExpiresAt: expiresAt,
+		})
 		return ctrl.Result{RequeueAfter: requeueFast}, nil
 	}
 
+	backend := pe.Spec.Backend
+	if backend == "" {
+		backend = "direct"
+	}
+
+	if backend == "argocd" {
+		return r.reconcileArgo(ctx, pe, expiresAt)
+	}
+	return r.reconcileDirect(ctx, pe, expiresAt)
+}
+
+func (r *PreviewEnvironmentReconciler) reconcileDirect(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment, expiresAt *metav1.Time) (ctrl.Result, error) {
 	if err := r.ensureChildren(ctx, pe); err != nil {
-		_ = r.patchStatus(ctx, pe, miragev1alpha1.PhaseFailed, metav1.ConditionFalse,
-			miragev1alpha1.ReasonRolloutFailed, err.Error(), "", expiresAt)
+		r.record(pe, corev1.EventTypeWarning, miragev1alpha1.ReasonRolloutFailed, err.Error())
+		_ = r.patchStatus(ctx, pe, statusPatch{
+			Phase: miragev1alpha1.PhaseFailed, Ready: metav1.ConditionFalse,
+			Reason: miragev1alpha1.ReasonRolloutFailed, Message: err.Error(), ExpiresAt: expiresAt,
+		})
 		return ctrl.Result{}, err
 	}
 
@@ -178,37 +202,74 @@ func (r *PreviewEnvironmentReconciler) reconcileActive(
 
 	url := previewURL(pe)
 	phase, cond, reason, msg, requeue := readinessResult(deploy, expiresAt)
-	if err := r.patchStatus(ctx, pe, phase, cond, reason, msg, url, expiresAt); err != nil {
+	if phase != miragev1alpha1.PhaseReady {
+		if pullMsg := r.imagePullMessage(ctx, pe); pullMsg != "" {
+			msg = pullMsg
+			reason = miragev1alpha1.ReasonRolloutFailed
+			phase = miragev1alpha1.PhaseFailed
+		}
+	} else {
+		r.record(pe, corev1.EventTypeNormal, miragev1alpha1.ReasonWorkloadReady, "Preview ready")
+		previewsReady.Inc()
+	}
+
+	replicaStatus := fmt.Sprintf("%d/%d", deploy.Status.ReadyReplicas, ptrInt32(deploy.Spec.Replicas, 1))
+	if err := r.patchStatus(ctx, pe, statusPatch{
+		Phase: phase, Ready: cond, Reason: reason, Message: msg, URL: url, ExpiresAt: expiresAt, ReplicaStatus: replicaStatus,
+	}); err != nil {
 		return ctrl.Result{}, err
 	}
 	return requeue, nil
 }
 
-func (r *PreviewEnvironmentReconciler) ensureChildren(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
-	if err := r.ensureLimitRange(ctx, pe); err != nil {
-		return err
+func (r *PreviewEnvironmentReconciler) reconcileDelete(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) (ctrl.Result, error) {
+	log.FromContext(ctx).Info("Deleting PreviewEnvironment children")
+	r.record(pe, corev1.EventTypeNormal, miragev1alpha1.ReasonDeleting, "Cleaning up preview resources")
+	if pe.Spec.Backend == "argocd" {
+		if err := r.deleteArgoApplication(ctx, pe); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
-	if err := r.ensureResourceQuota(ctx, pe); err != nil {
-		return err
+	if err := r.cleanupTarget(ctx, pe); err != nil {
+		return ctrl.Result{}, err
 	}
-	if err := r.ensureNetworkPolicy(ctx, pe); err != nil {
-		return err
+	// Wait briefly for namespace termination so orphans are less likely.
+	ns := &corev1.Namespace{}
+	err := r.Get(ctx, types.NamespacedName{Name: pe.Spec.TargetNamespace}, ns)
+	if err == nil && ownsNamespace(pe, ns) {
+		return ctrl.Result{RequeueAfter: namespaceDeleteWait}, nil
 	}
-	if _, err := r.ensureDeployment(ctx, pe); err != nil {
-		return err
+	if err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, err
 	}
-	if err := r.ensureService(ctx, pe); err != nil {
-		return err
+	controllerutil.RemoveFinalizer(pe, miragev1alpha1.FinalizerName)
+	if err := r.Update(ctx, pe); err != nil {
+		return ctrl.Result{}, err
 	}
-	if pe.Spec.Ingress != nil && pe.Spec.Ingress.Enabled {
-		return r.ensureIngress(ctx, pe)
+	previewsDeleted.Inc()
+	return ctrl.Result{}, nil
+}
+
+func (r *PreviewEnvironmentReconciler) record(pe *miragev1alpha1.PreviewEnvironment, eventType, reason, msg string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(pe, eventType, reason, msg)
 	}
-	return nil
+}
+
+func ptrInt32(p *int32, def int32) int32 {
+	if p == nil {
+		return def
+	}
+	return *p
 }
 
 func previewURL(pe *miragev1alpha1.PreviewEnvironment) string {
 	if pe.Spec.Ingress != nil && pe.Spec.Ingress.Enabled && pe.Spec.Ingress.Host != "" {
-		return "http://" + pe.Spec.Ingress.Host
+		scheme := "http"
+		if pe.Spec.Ingress.TLS != nil && pe.Spec.Ingress.TLS.Enabled {
+			scheme = "https"
+		}
+		return scheme + "://" + pe.Spec.Ingress.Host
 	}
 	return ""
 }
@@ -243,324 +304,6 @@ func readinessResult(deploy *appsv1.Deployment, expiresAt *metav1.Time) (phase s
 	return phase, cond, reason, msg, requeue
 }
 
-func (r *PreviewEnvironmentReconciler) reconcileDelete(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	logger.Info("Deleting PreviewEnvironment children")
-	if err := r.cleanupTarget(ctx, pe); err != nil {
-		return ctrl.Result{}, err
-	}
-	controllerutil.RemoveFinalizer(pe, miragev1alpha1.FinalizerName)
-	if err := r.Update(ctx, pe); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, nil
-}
-
-func (r *PreviewEnvironmentReconciler) cleanupTarget(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
-	if pe.Spec.TargetNamespace == "" {
-		return nil
-	}
-	ns := &corev1.Namespace{}
-	err := r.Get(ctx, types.NamespacedName{Name: pe.Spec.TargetNamespace}, ns)
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if !ownsNamespace(pe, ns) {
-		return nil
-	}
-	if err := r.Delete(ctx, ns); err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	return nil
-}
-
-type namespaceConflictError struct {
-	name string
-}
-
-func (e *namespaceConflictError) Error() string {
-	return fmt.Sprintf("namespace %q exists but is not owned by this PreviewEnvironment", e.name)
-}
-
-func isNamespaceConflict(err error) bool {
-	_, ok := err.(*namespaceConflictError)
-	return ok
-}
-
-func ownsNamespace(pe *miragev1alpha1.PreviewEnvironment, ns *corev1.Namespace) bool {
-	if ns.Labels == nil {
-		return false
-	}
-	return ns.Labels[miragev1alpha1.LabelOwnerUID] == string(pe.UID)
-}
-
-func (r *PreviewEnvironmentReconciler) ensureNamespace(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
-	ns := &corev1.Namespace{}
-	err := r.Get(ctx, types.NamespacedName{Name: pe.Spec.TargetNamespace}, ns)
-	if apierrors.IsNotFound(err) {
-		ns = &corev1.Namespace{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: pe.Spec.TargetNamespace,
-				Labels: map[string]string{
-					miragev1alpha1.LabelManagedBy:      miragev1alpha1.ManagedByValue,
-					miragev1alpha1.LabelOwnerUID:       string(pe.UID),
-					miragev1alpha1.LabelOwnerName:      pe.Name,
-					miragev1alpha1.LabelOwnerNamespace: pe.Namespace,
-					// Enforce restricted Pod Security Standards on preview workloads.
-					"pod-security.kubernetes.io/enforce": "restricted",
-					"pod-security.kubernetes.io/warn":    "restricted",
-					"pod-security.kubernetes.io/audit":   "restricted",
-				},
-			},
-		}
-		return r.Create(ctx, ns)
-	}
-	if err != nil {
-		return err
-	}
-	if !ownsNamespace(pe, ns) {
-		return &namespaceConflictError{name: ns.Name}
-	}
-	return nil
-}
-
-func (r *PreviewEnvironmentReconciler) workloadLabels(pe *miragev1alpha1.PreviewEnvironment) map[string]string {
-	return map[string]string{
-		appLabel:                           pe.Name,
-		componentLabel:                     "preview",
-		miragev1alpha1.LabelManagedBy:      miragev1alpha1.ManagedByValue,
-		miragev1alpha1.LabelOwnerUID:       string(pe.UID),
-		miragev1alpha1.LabelOwnerName:      pe.Name,
-		miragev1alpha1.LabelOwnerNamespace: pe.Namespace,
-	}
-}
-
-func (r *PreviewEnvironmentReconciler) ensureLimitRange(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
-	lr := &corev1.LimitRange{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "mirage-defaults",
-			Namespace: pe.Spec.TargetNamespace,
-		},
-	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, lr, func() error {
-		lr.Labels = r.workloadLabels(pe)
-		lr.Spec.Limits = []corev1.LimitRangeItem{{
-			Type: corev1.LimitTypeContainer,
-			Default: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("100m"),
-				corev1.ResourceMemory: resource.MustParse("128Mi"),
-			},
-			DefaultRequest: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("50m"),
-				corev1.ResourceMemory: resource.MustParse("64Mi"),
-			},
-			Max: corev1.ResourceList{
-				corev1.ResourceCPU:    resource.MustParse("1"),
-				corev1.ResourceMemory: resource.MustParse("512Mi"),
-			},
-		}}
-		return nil
-	})
-	return err
-}
-
-func (r *PreviewEnvironmentReconciler) ensureResourceQuota(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
-	rq := &corev1.ResourceQuota{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "mirage-quota",
-			Namespace: pe.Spec.TargetNamespace,
-		},
-	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, rq, func() error {
-		rq.Labels = r.workloadLabels(pe)
-		rq.Spec.Hard = corev1.ResourceList{
-			corev1.ResourceRequestsCPU:    resource.MustParse("1"),
-			corev1.ResourceRequestsMemory: resource.MustParse("1Gi"),
-			corev1.ResourceLimitsCPU:      resource.MustParse("2"),
-			corev1.ResourceLimitsMemory:   resource.MustParse("2Gi"),
-			corev1.ResourcePods:           resource.MustParse("10"),
-		}
-		return nil
-	})
-	return err
-}
-
-// ensureNetworkPolicy allows DNS egress and ingress on the preview Service port;
-// all other egress is denied (baseline isolation for untrusted PR workloads).
-func (r *PreviewEnvironmentReconciler) ensureNetworkPolicy(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
-	port := pe.Spec.ContainerPort
-	if port == 0 {
-		port = defaultContainerPort
-	}
-	np := &networkingv1.NetworkPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "mirage-baseline",
-			Namespace: pe.Spec.TargetNamespace,
-		},
-	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, np, func() error {
-		np.Labels = r.workloadLabels(pe)
-		np.Spec.PodSelector = metav1.LabelSelector{MatchLabels: map[string]string{appLabel: pe.Name}}
-		np.Spec.PolicyTypes = []networkingv1.PolicyType{
-			networkingv1.PolicyTypeIngress,
-			networkingv1.PolicyTypeEgress,
-		}
-		np.Spec.Ingress = []networkingv1.NetworkPolicyIngressRule{{
-			Ports: []networkingv1.NetworkPolicyPort{{
-				Protocol: protocolPtr(corev1.ProtocolTCP),
-				Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: port},
-			}},
-		}}
-		dnsUDP := networkingv1.NetworkPolicyPort{
-			Protocol: protocolPtr(corev1.ProtocolUDP),
-			Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 53},
-		}
-		dnsTCP := networkingv1.NetworkPolicyPort{
-			Protocol: protocolPtr(corev1.ProtocolTCP),
-			Port:     &intstr.IntOrString{Type: intstr.Int, IntVal: 53},
-		}
-		np.Spec.Egress = []networkingv1.NetworkPolicyEgressRule{{
-			Ports: []networkingv1.NetworkPolicyPort{dnsUDP, dnsTCP},
-		}}
-		return nil
-	})
-	return err
-}
-
-func protocolPtr(p corev1.Protocol) *corev1.Protocol { return &p }
-
-func (r *PreviewEnvironmentReconciler) ensureDeployment(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) (*appsv1.Deployment, error) {
-	replicas := defaultReplicas
-	if pe.Spec.Replicas != nil {
-		replicas = *pe.Spec.Replicas
-	}
-	port := pe.Spec.ContainerPort
-	if port == 0 {
-		port = defaultContainerPort
-	}
-	labels := r.workloadLabels(pe)
-
-	deploy := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      pe.Name,
-			Namespace: pe.Spec.TargetNamespace,
-		},
-	}
-
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, deploy, func() error {
-		deploy.Labels = labels
-		deploy.Spec.Replicas = &replicas
-		if deploy.Spec.Selector == nil {
-			deploy.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{appLabel: pe.Name}}
-		}
-		deploy.Spec.Template.ObjectMeta.Labels = labels
-		deploy.Spec.Template.Spec.Containers = []corev1.Container{{
-			Name:      "app",
-			Image:     pe.Spec.Image,
-			Env:       pe.Spec.Env,
-			Resources: pe.Spec.Resources,
-			Ports: []corev1.ContainerPort{{
-				Name:          "http",
-				ContainerPort: port,
-			}},
-			SecurityContext: &corev1.SecurityContext{
-				AllowPrivilegeEscalation: boolPtr(false),
-				RunAsNonRoot:             boolPtr(true),
-				Capabilities: &corev1.Capabilities{
-					Drop: []corev1.Capability{"ALL"},
-				},
-				SeccompProfile: &corev1.SeccompProfile{
-					Type: corev1.SeccompProfileTypeRuntimeDefault,
-				},
-			},
-		}}
-		automount := false
-		deploy.Spec.Template.Spec.AutomountServiceAccountToken = &automount
-		deploy.Spec.Template.Spec.SecurityContext = &corev1.PodSecurityContext{
-			RunAsNonRoot: boolPtr(true),
-			SeccompProfile: &corev1.SeccompProfile{
-				Type: corev1.SeccompProfileTypeRuntimeDefault,
-			},
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	if err := r.Get(ctx, types.NamespacedName{Name: deploy.Name, Namespace: deploy.Namespace}, deploy); err != nil {
-		return nil, err
-	}
-	return deploy, nil
-}
-
-func boolPtr(v bool) *bool { return &v }
-
-func (r *PreviewEnvironmentReconciler) ensureService(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
-	port := pe.Spec.ContainerPort
-	if port == 0 {
-		port = defaultContainerPort
-	}
-	labels := r.workloadLabels(pe)
-	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      pe.Name,
-			Namespace: pe.Spec.TargetNamespace,
-		},
-	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
-		svc.Labels = labels
-		svc.Spec.Selector = map[string]string{appLabel: pe.Name}
-		svc.Spec.Ports = []corev1.ServicePort{{
-			Name:       "http",
-			Port:       80,
-			TargetPort: intstr.FromInt32(port),
-			Protocol:   corev1.ProtocolTCP,
-		}}
-		return nil
-	})
-	return err
-}
-
-func (r *PreviewEnvironmentReconciler) ensureIngress(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment) error {
-	if pe.Spec.Ingress == nil || pe.Spec.Ingress.Host == "" {
-		return fmt.Errorf("ingress.enabled requires ingress.host")
-	}
-	labels := r.workloadLabels(pe)
-	pathType := networkingv1.PathTypePrefix
-	ing := &networkingv1.Ingress{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      pe.Name,
-			Namespace: pe.Spec.TargetNamespace,
-		},
-	}
-	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ing, func() error {
-		ing.Labels = labels
-		ing.Spec.IngressClassName = pe.Spec.Ingress.IngressClassName
-		ing.Spec.Rules = []networkingv1.IngressRule{{
-			Host: pe.Spec.Ingress.Host,
-			IngressRuleValue: networkingv1.IngressRuleValue{
-				HTTP: &networkingv1.HTTPIngressRuleValue{
-					Paths: []networkingv1.HTTPIngressPath{{
-						Path:     "/",
-						PathType: &pathType,
-						Backend: networkingv1.IngressBackend{
-							Service: &networkingv1.IngressServiceBackend{
-								Name: pe.Name,
-								Port: networkingv1.ServiceBackendPort{Name: "http"},
-							},
-						},
-					}},
-				},
-			},
-		}}
-		return nil
-	})
-	return err
-}
-
 func deploymentReady(d *appsv1.Deployment) bool {
 	desired := int32(1)
 	if d.Spec.Replicas != nil {
@@ -584,29 +327,33 @@ func deploymentProgressDeadline(d *appsv1.Deployment) bool {
 	return false
 }
 
-func (r *PreviewEnvironmentReconciler) patchStatus(
-	ctx context.Context,
-	pe *miragev1alpha1.PreviewEnvironment,
-	phase string,
-	readyStatus metav1.ConditionStatus,
-	reason, message, url string,
-	expiresAt *metav1.Time,
-) error {
+type statusPatch struct {
+	Phase, Reason, Message, URL, ReplicaStatus, ArgoApp string
+	Ready                                               metav1.ConditionStatus
+	ExpiresAt                                           *metav1.Time
+}
+
+func (r *PreviewEnvironmentReconciler) patchStatus(ctx context.Context, pe *miragev1alpha1.PreviewEnvironment, p statusPatch) error {
 	latest := &miragev1alpha1.PreviewEnvironment{}
 	if err := r.Get(ctx, types.NamespacedName{Name: pe.Name, Namespace: pe.Namespace}, latest); err != nil {
 		return err
 	}
 	meta.SetStatusCondition(&latest.Status.Conditions, metav1.Condition{
 		Type:               miragev1alpha1.ConditionReady,
-		Status:             readyStatus,
-		Reason:             reason,
-		Message:            message,
+		Status:             p.Ready,
+		Reason:             p.Reason,
+		Message:            p.Message,
 		ObservedGeneration: latest.Generation,
 	})
-	latest.Status.Phase = phase
-	latest.Status.URL = url
-	if expiresAt != nil {
-		latest.Status.ExpiresAt = expiresAt
+	latest.Status.Phase = p.Phase
+	latest.Status.URL = p.URL
+	latest.Status.Message = p.Message
+	latest.Status.ReplicaStatus = p.ReplicaStatus
+	if p.ArgoApp != "" {
+		latest.Status.ArgoApplication = p.ArgoApp
+	}
+	if p.ExpiresAt != nil {
+		latest.Status.ExpiresAt = p.ExpiresAt
 	}
 	latest.Status.ObservedGeneration = latest.Generation
 	if err := r.Status().Update(ctx, latest); err != nil {
@@ -616,9 +363,11 @@ func (r *PreviewEnvironmentReconciler) patchStatus(
 	return nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
 func (r *PreviewEnvironmentReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	mapOwnedDeploy := handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
+	if r.Recorder == nil {
+		r.Recorder = mgr.GetEventRecorderFor("previewenvironment-controller")
+	}
+	mapOwned := handler.EnqueueRequestsFromMapFunc(func(_ context.Context, obj client.Object) []reconcile.Request {
 		labels := obj.GetLabels()
 		if labels[miragev1alpha1.LabelManagedBy] != miragev1alpha1.ManagedByValue {
 			return nil
@@ -630,10 +379,9 @@ func (r *PreviewEnvironmentReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		}
 		return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: name, Namespace: ns}}}
 	})
-
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&miragev1alpha1.PreviewEnvironment{}).
-		Watches(&appsv1.Deployment{}, mapOwnedDeploy).
+		Watches(&appsv1.Deployment{}, mapOwned).
 		Named("previewenvironment").
 		Complete(r)
 }
