@@ -78,21 +78,21 @@ var _ = Describe("PreviewEnvironment Controller", func() {
 			pe := &miragev1alpha1.PreviewEnvironment{}
 			err := k8sClient.Get(ctx, typeNamespacedName, pe)
 			if apierrors.IsNotFound(err) {
+				forceRemoveNamespace(ctx, targetNS)
 				return
 			}
 			Expect(err).NotTo(HaveOccurred())
 			Expect(k8sClient.Delete(ctx, pe)).To(Succeed())
 
-			// Drive finalizer cleanup
+			// Drive finalizer cleanup. envtest has no namespace controller, so strip
+			// namespace finalizers so Delete can reach NotFound for reconcileDelete.
 			Eventually(func(g Gomega) {
+				forceRemoveNamespace(ctx, targetNS)
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: typeNamespacedName})
 				g.Expect(err).NotTo(HaveOccurred())
 				err = k8sClient.Get(ctx, typeNamespacedName, &miragev1alpha1.PreviewEnvironment{})
 				g.Expect(apierrors.IsNotFound(err)).To(BeTrue())
 			}, timeout, interval).Should(Succeed())
-
-			// Namespace may linger in Terminating under envtest; best-effort delete
-			_ = k8sClient.Delete(ctx, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: targetNS}})
 		})
 
 		It("creates namespace, deployment, service and reaches Ready after deploy available", func() {
@@ -264,8 +264,9 @@ var _ = Describe("PreviewEnvironment Controller", func() {
 			_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 			Expect(err).NotTo(HaveOccurred())
 
-			// Finalizer cleanup
+			// Finalizer cleanup (strip ns finalizers for envtest)
 			Eventually(func(g Gomega) {
+				forceRemoveNamespace(ctx, targetNS)
 				_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: name})
 				g.Expect(err).NotTo(HaveOccurred())
 				err = k8sClient.Get(ctx, name, &miragev1alpha1.PreviewEnvironment{})
@@ -279,4 +280,17 @@ func int32Ptr(v int32) *int32 { return &v }
 
 func randomSuffix() string {
 	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
+// forceRemoveNamespace clears finalizers so envtest can finish Namespace deletion.
+func forceRemoveNamespace(ctx context.Context, name string) {
+	ns := &corev1.Namespace{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: name}, ns); err != nil {
+		return
+	}
+	if len(ns.Finalizers) > 0 {
+		ns.Finalizers = nil
+		_ = k8sClient.Update(ctx, ns)
+	}
+	_ = k8sClient.Delete(ctx, ns)
 }
