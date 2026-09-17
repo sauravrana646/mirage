@@ -233,10 +233,15 @@ func (r *PreviewEnvironmentReconciler) reconcileDelete(ctx context.Context, pe *
 	if err := r.cleanupTarget(ctx, pe); err != nil {
 		return ctrl.Result{}, err
 	}
-	// Wait briefly for namespace termination so orphans are less likely.
+	// Wait until the owned namespace is gone or deletion is in progress.
+	// If delete has not been observed yet, requeue briefly; once Terminating
+	// (or NotFound / not owned), release the finalizer so the CR can finish.
 	ns := &corev1.Namespace{}
 	err := r.Get(ctx, types.NamespacedName{Name: pe.Spec.TargetNamespace}, ns)
-	if err == nil && ownsNamespace(pe, ns) {
+	if err == nil && ownsNamespace(pe, ns) && ns.DeletionTimestamp.IsZero() {
+		if delErr := r.Delete(ctx, ns); delErr != nil && !apierrors.IsNotFound(delErr) {
+			return ctrl.Result{}, delErr
+		}
 		return ctrl.Result{RequeueAfter: namespaceDeleteWait}, nil
 	}
 	if err != nil && !apierrors.IsNotFound(err) {
