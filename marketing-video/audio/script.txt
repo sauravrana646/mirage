@@ -1,0 +1,26 @@
+Mirage.
+
+Kubernetes-native preview environments that appear for a pull request — and vanish when you're done.
+
+Every PR deserves a real environment. Not a shared staging cluster. Not YAML archaeology.
+
+With PreviewTemplate, platform teams set the defaults: resources, networking, ingress, TTL.
+Developers only specify what changes for their pull request.
+
+Apply a PreviewEnvironment. Watch it come alive —
+NamespaceReady. WorkloadReady. NetworkReady. RouteReady.
+
+One click. A live URL that matches the PR.
+
+Need more than a single container? Declare multiple services — API, frontend, worker —
+each with its own deployment, and optional dependencies like Postgres and Redis,
+credentials injected safely through Kubernetes secrets.
+
+Manage it all with the Mirage CLI.
+List previews. Grab the URL. Stream logs. Diagnose issues. Estimate cost.
+
+When the PR closes — or the TTL expires — Mirage tears everything down.
+Clean. Isolated. Gone.
+
+Mirage.
+Appears for a PR. Vanishes when done.
