@@ -543,23 +543,23 @@ const TemplateFlow: React.FC = () => {
 
 const Conditions: React.FC = () => {
   const frame = useCurrentFrame();
-  // Timed to VO: NamespaceReady→RouteReady (~33–40s), URL (~42s)
+  // Timed to VO within Conditions scene starting ~28.2s
   const items = [
-    {label: 'NamespaceReady', at: 160},
-    {label: 'WorkloadReady', at: 218},
-    {label: 'NetworkReady', at: 274},
-    {label: 'RouteReady', at: 328},
+    {label: 'NamespaceReady', at: 140},
+    {label: 'WorkloadReady', at: 198},
+    {label: 'NetworkReady', at: 254},
+    {label: 'RouteReady', at: 308},
   ];
-  const urlReveal = interpolate(frame, [378, 408], [0, 1], {
+  const urlReveal = interpolate(frame, [356, 386], [0, 1], {
     extrapolateLeft: 'clamp',
     extrapolateRight: 'clamp',
     easing: ease,
   });
-  const cursorX = interpolate(frame, [400, 460], [980, 1120], {
+  const cursorX = interpolate(frame, [380, 440], [980, 1120], {
     extrapolateLeft: 'clamp',
     extrapolateRight: 'clamp',
   });
-  const cursorY = interpolate(frame, [400, 460], [620, 560], {
+  const cursorY = interpolate(frame, [380, 440], [620, 560], {
     extrapolateLeft: 'clamp',
     extrapolateRight: 'clamp',
   });
@@ -685,7 +685,7 @@ const Conditions: React.FC = () => {
             </div>
           </Panel>
         </div>
-        {frame > 395 ? <Cursor x={cursorX} y={cursorY} clickAt={448} /> : null}
+        {frame > 375 ? <Cursor x={cursorX} y={cursorY} clickAt={428} /> : null}
       </AbsoluteFill>
     </AbsoluteFill>
   );
@@ -835,11 +835,11 @@ const MultiService: React.FC = () => {
 const CliDemo: React.FC = () => {
   const frame = useCurrentFrame();
   const lines = [
-    {cmd: '$ mirage list', out: 'pr-142   Ready   https://pr-142.previews…', at: 115},
-    {cmd: '$ mirage url pr-142', out: 'https://pr-142.previews.example.com', at: 175},
-    {cmd: '$ mirage logs pr-142 --service frontend', out: 'listening on :8080', at: 235},
-    {cmd: '$ mirage diagnose pr-142', out: 'All conditions Ready ✓', at: 295},
-    {cmd: '$ mirage cost pr-142', out: 'est. $0.42 / day', at: 355},
+    {cmd: '$ mirage list', out: 'pr-142   Ready   https://pr-142.previews…', at: 85},
+    {cmd: '$ mirage url pr-142', out: 'https://pr-142.previews.example.com', at: 148},
+    {cmd: '$ mirage logs pr-142 --service frontend', out: 'listening on :8080', at: 208},
+    {cmd: '$ mirage diagnose pr-142', out: 'All conditions Ready ✓', at: 268},
+    {cmd: '$ mirage cost pr-142', out: 'est. $0.42 / day', at: 330},
   ];
   const camY = interpolate(frame, [0, 280], [20, -10], {
     extrapolateRight: 'clamp',
@@ -1063,47 +1063,37 @@ const Closing: React.FC = () => {
 
 function Crossfade({
   children,
-  durationInFrames,
 }: {
   children: React.ReactNode;
-  durationInFrames: number;
+  durationInFrames?: number;
 }) {
   const frame = useCurrentFrame();
-  const fadeIn = interpolate(frame, [0, 12], [0, 1], {
+  const fadeIn = interpolate(frame, [0, 14], [0, 1], {
     extrapolateRight: 'clamp',
+    easing: ease,
   });
-  const fadeOut = interpolate(
-    frame,
-    [durationInFrames - 12, durationInFrames],
-    [1, 0],
-    {extrapolateLeft: 'clamp', extrapolateRight: 'clamp'},
-  );
-  return (
-    <AbsoluteFill style={{opacity: Math.min(fadeIn, fadeOut)}}>
-      {children}
-    </AbsoluteFill>
-  );
+  return <AbsoluteFill style={{opacity: fadeIn}}>{children}</AbsoluteFill>;
 }
 
 export const MirageVideo: React.FC = () => {
-  // Scene starts in frames (synced to VO + small lead-ins)
+  // Non-overlapping scenes (fade-in only) so layers never composite
   const scenes: {Comp: React.FC; from: number; dur: number}[] = [
-    {Comp: Opening, from: 0, dur: 240}, // 0–8s
-    {Comp: Problem, from: 225, dur: 255}, // ~7.5–16s
-    {Comp: TemplateFlow, from: 465, dur: 375}, // 15.5–28s
-    {Comp: Conditions, from: 825, dur: 510}, // 27.5–44.5s
-    {Comp: MultiService, from: 1320, dur: 540}, // 44–62s
-    {Comp: CliDemo, from: 1830, dur: 420}, // 61–75s
-    {Comp: Teardown, from: 2220, dur: 330}, // 74–85s
-    {Comp: Closing, from: 2520, dur: 240}, // 84–92s
+    {Comp: Opening, from: 0, dur: 236}, // 0–7.9s
+    {Comp: Problem, from: 236, dur: 250}, // 7.9–16.2s
+    {Comp: TemplateFlow, from: 486, dur: 360}, // 16.2–28.2s
+    {Comp: Conditions, from: 846, dur: 504}, // 28.2–45.0s
+    {Comp: MultiService, from: 1350, dur: 510}, // 45–62s
+    {Comp: CliDemo, from: 1860, dur: 390}, // 62–75s
+    {Comp: Teardown, from: 2250, dur: 300}, // 75–85s
+    {Comp: Closing, from: 2550, dur: 210}, // 85–92s
   ];
 
   return (
     <AbsoluteFill style={{backgroundColor: colors.bg0}}>
       <Audio src={staticFile('vo.mp3')} />
       {scenes.map(({Comp, from, dur}) => (
-        <Sequence key={from} from={from} durationInFrames={dur}>
-          <Crossfade durationInFrames={dur}>
+        <Sequence key={from} from={from} durationInFrames={dur} layout="none">
+          <Crossfade>
             <Comp />
           </Crossfade>
         </Sequence>
